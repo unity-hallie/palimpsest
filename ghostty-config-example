@@ -1,0 +1,38 @@
+# The Palimpsest
+# A terminal that remembers
+
+# Paper theme
+background = F5F0E8
+foreground = 2C2416
+cursor-color = 8B7355
+
+# Warm ink palette
+palette = 0=#2C2416
+palette = 1=#8B4513
+palette = 2=#556B2F
+palette = 3=#8B7355
+palette = 4=#4A5568
+palette = 5=#6B4984
+palette = 6=#5F7A8B
+palette = 7=#C4B9A7
+palette = 8=#5C4A3A
+palette = 9=#A0522D
+palette = 10=#6B8E23
+palette = 11=#A89070
+palette = 12=#647A8E
+palette = 13=#8B6AAD
+palette = 14=#7A9BAD
+palette = 15=#F5F0E8
+
+# Font
+font-family = SF Mono
+font-size = 15
+font-thicken = true
+
+# Shader
+custom-shader = shaders/palimpsest.glsl
+custom-shader-animation = always
+
+# Window
+window-theme = system
+macos-titlebar-style = hidden

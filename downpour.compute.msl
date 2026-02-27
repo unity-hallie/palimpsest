@@ -1,0 +1,145 @@
+// DOWNPOUR COMPUTE — cellular automata water + grime
+//
+// State texture (rgba16f):
+//   R = water amount  [0,1]
+//   G = grime amount  [0,1]
+//   B, A = unused
+//
+// Water: gravity pulls down (3px/frame), surface noise + grime deflection
+//        create organic wander. Isolated water evaporates faster (surface
+//        tension). Rain seeds at top edge.
+// Grime: slowly accumulates everywhere, water washes it away.
+//        Spatially varied (edges + noise patches).
+//
+// Texture bindings:
+//   t0 = iChannel0 (terminal)
+//   t2 = iChannel1 (display feedback — frame seed)
+//   t3 = state_read
+//   t8 = state_write
+
+#include <metal_stdlib>
+using namespace metal;
+
+// ── Tuning ──────────────────────────────────────────────────────────
+constant int   FLOW_SPEED     = 4;       // pixels per frame downward
+constant float EVAP_RATE      = 0.002;   // base evaporation per frame
+constant float EDGE_EVAP      = 0.006;   // extra evaporation for isolated water
+constant float FLOW_THRESHOLD = 0.02;    // min water to propagate
+constant float GRIME_GROW     = 0.00015; // ~77s half-life to full grime
+constant float GRIME_WASH     = 0.08;    // how fast water clears grime
+constant float SURFACE_WANDER = 0.007;   // horizontal drift from glass texture
+constant float GRIME_DEFLECT  = 0.004;   // horizontal drift from grime avoidance
+constant float RAIN_DENSITY   = 0.997;   // 1 - chance of rain seed per cell/frame
+
+// ── Helpers ─────────────────────────────────────────────────────────
+float hash21(float2 p) {
+    p = fract(p * float2(127.1, 311.7));
+    p += dot(p, p.yx + 19.19);
+    return fract(p.x * p.y);
+}
+
+float noise(float2 p) {
+    float2 i = floor(p);
+    float2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = hash21(i);
+    float b = hash21(i + float2(1, 0));
+    float c = hash21(i + float2(0, 1));
+    float d = hash21(i + float2(1, 1));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+// ── Kernel ──────────────────────────────────────────────────────────
+kernel void computeMain(
+    texture2d<float, access::sample> terminal    [[ texture(0) ]],
+    texture2d<float, access::sample> feedback    [[ texture(2) ]],
+    texture2d<float, access::sample> state_read  [[ texture(3) ]],
+    texture2d<float, access::write>  state_write [[ texture(8) ]],
+    uint2                            gid         [[ thread_position_in_grid ]]
+) {
+    uint W = state_write.get_width();
+    uint H = state_write.get_height();
+    if (gid.x >= W || gid.y >= H) return;
+
+    constexpr sampler smp(filter::linear, address::clamp_to_edge);
+    float2 uv = (float2(gid) + 0.5) / float2(W, H);
+    float2 px = 1.0 / float2(W, H);
+
+    // ── Read current state ──────────────────────────────────────────
+    float4 prev  = state_read.sample(smp, uv);
+    float water  = prev.r;
+    float grime  = prev.g;
+
+    // ── Frame seed ──────────────────────────────────────────────────
+    float3 fs = feedback.sample(smp, float2(0.5)).rgb;
+    float frameSeed = fract(dot(fs, float3(13.7, 53.3, 91.1)));
+
+    // ── Horizontal wander ───────────────────────────────────────────
+    // Glass surface texture (static noise)
+    float surfNoise = (noise(uv * 50.0) - 0.5) * 0.7
+                    + (noise(uv * 180.0) - 0.5) * 0.3;
+    float xOffset = surfNoise * SURFACE_WANDER;
+
+    // Grime deflection: water avoids grimy areas
+    float grimeL = state_read.sample(smp, uv + float2(-px.x * 3.0, 0)).g;
+    float grimeR = state_read.sample(smp, uv + float2( px.x * 3.0, 0)).g;
+    xOffset += (grimeR - grimeL) * GRIME_DEFLECT;
+
+    // ── Gravity: pull water from above ──────────────────────────────
+    float inflow = 0.0;
+    for (int dy = 1; dy <= FLOW_SPEED; dy++) {
+        float2 aboveUV = clamp(uv + float2(xOffset, -float(dy) * px.y),
+                               float2(0.001), float2(0.999));
+        float w = state_read.sample(smp, aboveUV).r;
+        inflow = max(inflow, w);
+    }
+
+    // Only propagate above threshold (small drops sit still)
+    float newWater = water;
+    if (inflow > FLOW_THRESHOLD) {
+        newWater = max(water, inflow * 0.999);
+    }
+
+    // ── Surface tension: isolated water evaporates faster ───────────
+    float wetL = state_read.sample(smp, uv + float2(-px.x, 0)).r;
+    float wetR = state_read.sample(smp, uv + float2( px.x, 0)).r;
+    float wetU = state_read.sample(smp, uv + float2(0, -px.y)).r;
+    float wetD = state_read.sample(smp, uv + float2(0,  px.y)).r;
+    float nbWater = (wetL + wetR + wetU + wetD) * 0.25;
+    float isolation = 1.0 - smoothstep(0.0, 0.15, nbWater);
+
+    newWater *= (1.0 - EVAP_RATE);
+    newWater -= isolation * EDGE_EVAP;
+
+    // ── Rain seeding at top ─────────────────────────────────────────
+    if (uv.y < 0.025) {
+        // Larger seed clusters (6px), more frequent
+        float2 seedCell = floor(float2(gid) / 6.0);
+        float seedRng = hash21(seedCell * 0.037 + frameSeed * 73.1);
+        if (seedRng > RAIN_DENSITY) {
+            float dist = length(float2(gid) - seedCell * 6.0 - 3.0);
+            float drop = smoothstep(4.0, 0.5, dist);
+            newWater = max(newWater, drop * 0.95);
+        }
+    }
+
+    // Occasional stationary drops across the screen
+    float dropRng = hash21(float2(gid) * 0.027 + frameSeed * 31.7);
+    if (dropRng > 0.99995) {
+        newWater = max(newWater, 0.35);
+    }
+
+    newWater = clamp(newWater, 0.0, 1.0);
+
+    // ── Grime accumulation ──────────────────────────────────────────
+    float gNoise   = noise(float2(gid) * 0.015) * 0.6
+                   + noise(float2(gid) * 0.06)  * 0.4;
+    float edgeDust = smoothstep(0.35, 1.0, length((uv - 0.5) * 2.0));
+    float grimeCeil = 0.3 + edgeDust * 0.4 + gNoise * 0.3;
+
+    float newGrime = grime + GRIME_GROW * (grimeCeil - grime);
+    newGrime -= newWater * GRIME_WASH;
+    newGrime = clamp(newGrime, 0.0, 1.0);
+
+    state_write.write(float4(newWater, newGrime, 0.0, 0.0), gid);
+}

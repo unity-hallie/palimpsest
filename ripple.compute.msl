@@ -1,0 +1,121 @@
+// ripple.compute.msl — viscoelastic wave equation
+//
+// State (rgba16f):
+//   R = u_curr       current wave height
+//   G = u_old        previous frame height
+//   B = prev_luma    terminal luminance snapshot (impulse detection)
+//   A = time         frame accumulator (~0.016 per frame)
+//
+// Physics:
+//   Second-order damped wave equation with non-Newtonian shear-thinning,
+//   plasticity (settled peaks resist restoring force), and a slow
+//   fbm-based convection current field for organic undertow.
+
+#include <metal_stdlib>
+using namespace metal;
+
+// ── Tuning ────────────────────────────────────────────────────────────────────
+#define WAVE_SPEED   0.14f    // c²  — slightly slower → narrower, tighter ripples
+#define BASE_DAMP    0.030f   // γ   — base viscous damping
+#define NON_NEWT     0.55f    // shear-thinning: high energy → much lower damping
+#define PLASTICITY   0.18f    // peak retention: settled regions resist restoring force
+#define CURRENT_STR  0.000f   // convection field magnitude
+#define UNDERTOW     float2(0.0000f, 0.0000f)   // persistent directional drift
+// ─────────────────────────────────────────────────────────────────────────────
+
+static float hash21(float2 p) {
+    p = fract(p * float2(127.1f, 311.7f));
+    p += dot(p, p.yx + 19.19f);
+    return fract(p.x * p.y);
+}
+static float vnoise(float2 p) {
+    float2 i = floor(p), f = fract(p);
+    f = f * f * (3.0f - 2.0f * f);
+    float a = hash21(i),          b = hash21(i + float2(1,0)),
+          c = hash21(i + float2(0,1)), d = hash21(i + float2(1,1));
+    return mix(mix(a,b,f.x), mix(c,d,f.x), f.y);
+}
+static float fbm(float2 p) {
+    float v = 0.0f, a = 0.5f;
+    for (int i = 0; i < 4; i++) {
+        v += a * vnoise(p); p = p * 2.1f + float2(1.7f, 9.2f); a *= 0.5f;
+    }
+    return v;
+}
+
+kernel void computeMain(
+    texture2d<float, access::sample> terminal   [[ texture(0) ]],
+    texture2d<float, access::sample> feedback   [[ texture(2) ]],
+    texture2d<float, access::sample> state_read [[ texture(3) ]],
+    texture2d<float, access::write>  state_write[[ texture(8) ]],
+    uint2 gid [[ thread_position_in_grid ]]
+) {
+    uint W = state_write.get_width();
+    uint H = state_write.get_height();
+    if (gid.x >= W || gid.y >= H) return;
+
+    constexpr sampler smp(filter::linear, address::clamp_to_edge);
+    float2 uv = (float2(gid) + 0.5f) / float2(W, H);
+    float2 px = 1.0f / float2(W, H);
+
+    float4 st   = state_read.sample(smp, uv);
+    float u     = st.r;
+    float u_old = st.g;
+    float prevLuma = st.b;
+    float t     = st.a + 0.016f;    // frame time accumulator
+
+    // ── Convection current field ──────────────────────────────────────────────
+    // Two-scale: slow large circulation + faster eddies + persistent undertow
+    float2 cUV  = uv * 1.5f  + float2(t * 0.006f, t * 0.0075f);
+    float2 cUV2 = uv * 3.2f  + float2(t * 0.019f, t * 0.015f);
+    float2 cur  = float2(fbm(cUV)  - 0.5f, fbm(cUV  + float2(4.9f, 2.3f)) - 0.5f) * CURRENT_STR
+                + float2(fbm(cUV2) - 0.5f, fbm(cUV2 + float2(2.3f, 7.8f)) - 0.5f) * CURRENT_STR * 0.30f
+                + UNDERTOW;
+
+    // ── Laplacian neighbors (shifted by current → advects the wave field) ─────
+    float2 curL = uv + cur + float2(-px.x,  0.0f);
+    float2 curR = uv + cur + float2( px.x,  0.0f);
+    float2 curU = uv + cur + float2( 0.0f, -px.y);
+    float2 curD = uv + cur + float2( 0.0f,  px.y);
+    float uL = state_read.sample(smp, curL).r;
+    float uR = state_read.sample(smp, curR).r;
+    float uU = state_read.sample(smp, curU).r;
+    float uD = state_read.sample(smp, curD).r;
+
+    float vel = u - u_old;
+    float lap = uL + uR + uU + uD - 4.0f * u;
+
+    // ── Non-Newtonian shear-thinning: high energy → lower damping ────────────
+    float energy = sqrt(u * u + vel * vel);
+    float damp   = BASE_DAMP / (1.0f + NON_NEWT * energy * 10.0f);
+
+    // ── Plasticity: settled regions resist the restoring (Laplacian) force ────
+    float moving    = smoothstep(0.0f, 0.008f, abs(vel));
+    float restoring = mix(1.0f - PLASTICITY, 1.0f, moving);
+
+    // ── Wave equation: u_new = 2u - u_old + c²∇²u - γ(u - u_old) ────────────
+    float u_new = 2.0f*u - u_old + WAVE_SPEED * lap * restoring - damp * vel;
+
+    // ── Impulse from terminal content changes ─────────────────────────────────
+    float3 termNow  = terminal.sample(smp, uv).rgb;
+    float  termLuma = dot(termNow, float3(0.299f, 0.587f, 0.114f));
+    float  change   = abs(termLuma - prevLuma);
+    u_new += smoothstep(0.04f, 0.20f, change) * 0.12f;
+
+    // ── Ambient drops (~1 per second, hash-seeded) ────────────────────────────
+    float tSlot   = floor(t * 60.0f);
+    float dropRng = hash21(float2(tSlot, tSlot * 0.71f));
+    if (dropRng > 0.983f) {
+        float2 center = float2(hash21(float2(tSlot * 1.3f, 7.1f)),
+                               hash21(float2(tSlot * 2.1f, 3.7f)));
+        float  da = length(uv - center);
+        u_new += exp(-da*da * (1.0f / (2.0f * 0.012f * 0.012f))) * 0.06f;
+    }
+
+    // ── Absorbing boundary ────────────────────────────────────────────────────
+    float bx = smoothstep(0.0f, 0.04f, uv.x) * smoothstep(1.0f, 0.96f, uv.x);
+    float by = smoothstep(0.0f, 0.04f, uv.y) * smoothstep(1.0f, 0.96f, uv.y);
+    u_new = clamp(u_new * bx * by, -1.2f, 1.2f);
+
+    state_write.write(float4(u_new, u, termLuma, t), gid);
+}

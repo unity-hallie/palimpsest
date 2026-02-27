@@ -1,0 +1,677 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Neon Depth — beer-lambert liquid over terminal</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #06081a; width: 100vw; height: 100vh; overflow: hidden; }
+#container { position: relative; width: 100vw; height: 100vh; cursor: text; }
+#glcanvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+#input {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    opacity: 0; cursor: text; z-index: 10;
+    resize: none; border: none; outline: none;
+    background: transparent; color: transparent;
+    font-size: 15px; line-height: 22px;
+    font-family: monospace; padding: 16px;
+    caret-color: transparent;
+}
+#hint {
+    position: absolute; bottom: 14px; right: 18px;
+    color: rgba(80, 210, 180, 0.20); font: 11px/1.5 monospace;
+    pointer-events: none; z-index: 20; text-align: right;
+}
+#controls {
+    position: fixed; bottom: 14px; left: 18px;
+    color: rgba(80, 210, 180, 0.45);
+    font: 11px/2.0 "SF Mono","JetBrains Mono","Fira Code",monospace;
+    pointer-events: all; z-index: 30; user-select: none;
+}
+#controls label {
+    display: grid;
+    grid-template-columns: 11ch 150px 5ch;
+    gap: 6px; align-items: center;
+}
+#controls input[type=range] {
+    width: 150px; height: 3px;
+    accent-color: rgba(0, 220, 180, 0.70);
+    cursor: pointer;
+}
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="glcanvas"></canvas>
+  <textarea id="input" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
+  <div id="hint">neon depth · type to disturb the surface</div>
+</div>
+<div id="controls">
+  <label>depth      <input type="range" id="sDepth"   min="0.2"  max="3.0"  step="0.1"  value="1.0"> <span id="vDepth">1.0</span></label>
+  <label>extinction <input type="range" id="sExt"     min="0.2"  max="4.0"  step="0.1"  value="1.6"> <span id="vExt">1.6</span></label>
+  <label>scatter    <input type="range" id="sScatter" min="0"    max="2.0"  step="0.05" value="0.5"> <span id="vScatter">0.50</span></label>
+  <label>bloom      <input type="range" id="sBloom"   min="0"    max="1.0"  step="0.05" value="0.40"><span id="vBloom">0.40</span></label>
+  <label>speed      <input type="range" id="sSpeed"   min="0.05" max="0.45" step="0.01" value="0.18"><span id="vSpeed">0.18</span></label>
+  <label>damping    <input type="range" id="sDamp"    min="0"    max="0.12" step="0.005" value="0.035"><span id="vDamp">0.035</span></label>
+  <label>amplitude  <input type="range" id="sAmp"     min="0.2"  max="4.0"  step="0.1"  value="1.0"> <span id="vAmp">1.0</span></label>
+</div>
+<script>
+// ─── Sliders ──────────────────────────────────────────────────────────────────
+function bindSlider(id, valId, decimals) {
+    const el  = document.getElementById(id);
+    const vEl = document.getElementById(valId);
+    el.addEventListener('input', () => { vEl.textContent = parseFloat(el.value).toFixed(decimals); });
+    return el;
+}
+const sDepth   = bindSlider('sDepth',   'vDepth',   1);
+const sExt     = bindSlider('sExt',     'vExt',     1);
+const sScatter = bindSlider('sScatter', 'vScatter', 2);
+const sBloom   = bindSlider('sBloom',   'vBloom',   2);
+const sSpeed   = bindSlider('sSpeed',   'vSpeed',   2);
+const sDamp    = bindSlider('sDamp',    'vDamp',    3);
+const sAmp     = bindSlider('sAmp',     'vAmp',     1);
+
+// ─── Text canvas ──────────────────────────────────────────────────────────────
+const textCanvas = document.createElement('canvas');
+const tx = textCanvas.getContext('2d');
+
+const FONT_SIZE   = 15;
+const LINE_HEIGHT = 22;
+const PAD         = 16;
+const FONT        = `${FONT_SIZE}px "SF Mono","JetBrains Mono","Fira Code","Consolas",monospace`;
+
+// Palette — soft neon teal on near-black, readable for hours
+const BG_COLOR   = '#06081a';
+const TEXT_COLOR = '#72d8c0';   // dusty neon teal: vivid enough to glow, soft enough to read all day
+const CURSOR_BG  = '#00e4c8';   // slightly brighter cursor
+const CURSOR_FG  = '#06081a';
+
+tx.font = FONT;
+const CHAR_W = tx.measureText('M').width;
+
+const DEMO = `  neon depth — beer-lambert liquid over terminal
+
+  you are looking down through 3.5 cm of charged liquid.
+
+  where the surface thins — at troughs, at edges —
+  the neon source below bleeds through.
+  bloom halos the thin spots like a tear in the dark.
+
+  where the liquid pools and crests, the light drowns.
+  absorption strips the red first, then the green.
+  only a cold blue-violet remains, veiled in scatter.
+
+  the extinction law:
+
+    I(d) = I₀ · exp(−σd)
+
+  σ  extinction (how fast each wavelength is eaten)
+  d  local depth  =  base depth  +  wave displacement
+  I  transmitted radiance (what your eye receives)
+
+  crest: more liquid above you → deeper → dustier
+  trough: water pulled away → thinner → neon blazes
+
+  type here to disturb the surface.
+  watch where the light lives.
+`;
+
+const input = document.getElementById('input');
+input.value = DEMO;
+
+function drawText() {
+    const W = textCanvas.width, H = textCanvas.height;
+    tx.fillStyle = BG_COLOR;
+    tx.fillRect(0, 0, W, H);
+    tx.font = FONT;
+
+    const cols  = Math.floor((W - PAD * 2) / CHAR_W);
+    const lines = input.value.split('\n');
+
+    const sel = input.selectionStart;
+    let cursorLine = 0, cursorCol = 0, counted = 0;
+    for (let li = 0; li < lines.length; li++) {
+        if (counted + lines[li].length >= sel) {
+            cursorLine = li; cursorCol = sel - counted; break;
+        }
+        counted += lines[li].length + 1;
+    }
+
+    const focused = document.activeElement === input;
+    const blink   = Math.floor(Date.now() / 530) % 2 === 0;
+
+    let y = PAD + FONT_SIZE;
+    for (let li = 0; li < lines.length; li++) {
+        let line = lines[li];
+        let col  = 0;
+        while (line.length > cols) {
+            tx.fillStyle = TEXT_COLOR;
+            tx.fillText(line.slice(0, cols), PAD, y);
+            line = line.slice(cols); col += cols; y += LINE_HEIGHT;
+        }
+        tx.fillStyle = TEXT_COLOR;
+        tx.fillText(line, PAD, y);
+
+        if (li === cursorLine && focused && blink) {
+            const cx = PAD + cursorCol * CHAR_W;
+            tx.fillStyle = CURSOR_BG;
+            tx.fillRect(cx, y - FONT_SIZE + 2, Math.max(CHAR_W * 0.7, 2), LINE_HEIGHT - 3);
+            tx.fillStyle = CURSOR_FG;
+            const ch = line[cursorCol - col] || '';
+            if (ch) tx.fillText(ch, cx, y);
+        }
+        y += LINE_HEIGHT;
+    }
+}
+
+// ─── Cursor UV ────────────────────────────────────────────────────────────────
+function getCursorUV() {
+    const W = textCanvas.width, H = textCanvas.height;
+    const before = input.value.substring(0, input.selectionStart);
+    const lines  = before.split('\n');
+    const li     = lines.length - 1;
+    const col    = lines[li].length;
+    const px_x   = PAD + col * CHAR_W;
+    const px_y   = PAD + li * LINE_HEIGHT + LINE_HEIGHT * 0.5;
+    return [px_x / W, 1.0 - px_y / H];
+}
+
+let impulseUV    = [0.5, 0.5];
+let impStr       = 0.0;
+const IMP_DECAY  = 12.0;
+
+// Corridor scroll — 3rd-order jerk physics.
+// Keystrokes push jerk → jerk integrates into accel → accel integrates into velocity.
+// All three decay to zero: corridor spools up slowly and coasts to a complete stop.
+let scrollPos = 0.0;
+let jerk      = 0.0;   // rate of change of acceleration
+let accel     = 0.0;   // current acceleration
+let velocity  = 0.0;   // current scroll speed
+
+input.addEventListener('input', () => { impulseUV = getCursorUV(); impStr = 1.0;
+    jerk = Math.min(jerk + 2.0, 8.0);
+});
+input.addEventListener('keydown', e => {
+    if (e.key === 'Backspace' || e.key === 'Delete' || e.key === 'Enter') {
+        impulseUV = getCursorUV(); impStr = 0.7;
+    }
+});
+
+// ─── WebGL2 ───────────────────────────────────────────────────────────────────
+const glCanvas = document.getElementById('glcanvas');
+const gl = glCanvas.getContext('webgl2');
+if (!gl) {
+    document.body.innerHTML = '<p style="color:#00e4c8;font-family:monospace;padding:32px">WebGL2 not available</p>';
+}
+gl.getExtension('EXT_color_buffer_float');
+
+const VS = `#version 300 es
+in vec2 aPos;
+void main() { gl_Position = vec4(aPos, 0.0, 1.0); }`;
+
+// ─── Wave compute pass ────────────────────────────────────────────────────────
+// Standard damped wave equation with keystroke impulses and ambient drops.
+const WAVE_FS = `#version 300 es
+precision highp float;
+uniform sampler2D iState;
+uniform vec2      iResolution;
+uniform vec2      iImpulseUV;
+uniform float     iImpulseStr;
+uniform float     iTime;
+uniform float     iSpeed;
+uniform float     iDamp;
+uniform float     iAmplitude;
+out vec4 fragColor;
+
+float hash21(vec2 p) {
+    p = fract(p * vec2(127.1, 311.7));
+    p += dot(p, p.yx + 19.19);
+    return fract(p.x * p.y);
+}
+
+void main() {
+    vec2  uv = gl_FragCoord.xy / iResolution.xy;
+    vec2  px = 1.0 / iResolution.xy;
+
+    float u     = texture(iState, uv).r;
+    float u_old = texture(iState, uv).g;
+
+    float uL = texture(iState, uv - vec2(px.x, 0.0)).r;
+    float uR = texture(iState, uv + vec2(px.x, 0.0)).r;
+    float uU = texture(iState, uv - vec2(0.0, px.y)).r;
+    float uD = texture(iState, uv + vec2(0.0, px.y)).r;
+
+    float vel = u - u_old;
+    float lap = uL + uR + uU + uD - 4.0 * u;
+
+    // u_new = 2u − u_old + c²∇²u − γ(u − u_old)
+    float u_new = 2.0*u - u_old + iSpeed*lap - iDamp*vel;
+
+    // Keystroke impulse — Gaussian at cursor position
+    float d   = length(uv - iImpulseUV);
+    float sig = 0.022;
+    u_new += iImpulseStr * exp(-d*d / (2.0*sig*sig)) * 0.35 * iAmplitude;
+
+    // Ambient drop (~1 per second, hash-seeded)
+    float tSlot   = floor(iTime * 60.0);
+    float dropRng = hash21(vec2(tSlot, tSlot * 0.7));
+    if (dropRng > 0.983) {
+        vec2  center = vec2(hash21(vec2(tSlot * 1.3, 7.1)),
+                            hash21(vec2(tSlot * 2.1, 3.7)));
+        float da   = length(uv - center);
+        float siga = 0.012;
+        u_new += exp(-da*da / (2.0*siga*siga)) * 0.07 * iAmplitude;
+    }
+
+    // Absorbing boundary — prevents edge reflections
+    float bx = smoothstep(0.0, 0.04, uv.x) * smoothstep(1.0, 0.96, uv.x);
+    float by = smoothstep(0.0, 0.04, uv.y) * smoothstep(1.0, 0.96, uv.y);
+    float maxU = 0.6 * iAmplitude;
+    u_new = clamp(u_new * bx * by, -maxU, maxU);
+
+    fragColor = vec4(u_new, u, 0.0, 1.0);
+}`;
+
+// ─── Display pass — Beer-Lambert neon depth ───────────────────────────────────
+//
+// The liquid has a base depth of ~3.5 cm. Wave displacement u adds or removes
+// from that depth locally:
+//
+//   depth = iDepth + u * 0.55
+//
+// Crests (u > 0) pile up more liquid overhead  → deeper  → more extinction → dustier
+// Troughs (u < 0) pull liquid away             → shallower → light escapes → neon blazes
+//
+// Beer-Lambert: each channel is attenuated as exp(-σ·d).
+// Red dies fastest, blue slowest. Thick liquid goes blue-violet with a dusty scatter veil.
+// A bloom pass samples neighboring thin regions and halos their neon outward.
+const DISPLAY_FS = `#version 300 es
+precision highp float;
+uniform sampler2D iChannel0;   // terminal text texture
+uniform sampler2D iState;      // wave state: R = u_curr, G = u_old
+uniform vec2      iResolution;
+uniform float     iDepth;      // base liquid depth (slider)
+uniform float     iExtinction; // absorption strength multiplier (slider)
+uniform float     iScatter;    // dusty scatter strength (slider)
+uniform float     iBloom;      // bloom intensity (slider)
+uniform float     iScroll;     // corridor scroll position (JS-accumulated, typing speeds it up)
+uniform float     iTick;       // real elapsed time (for segment-based turn timing)
+out vec4 fragColor;
+
+// Hash for procedural corridor segment offsets
+float hash21_d(vec2 p) {
+    p = fract(p * vec2(127.1, 311.7));
+    p += dot(p, p.yx + 19.19);
+    return fract(p.x * p.y);
+}
+
+void main() {
+    vec2 uv = gl_FragCoord.xy / iResolution.xy;
+    vec2 px = 1.0 / iResolution.xy;
+
+    // ── Wave state ────────────────────────────────────────────────────────────
+    float u = texture(iState, uv).r;
+
+    // ── Surface gradient — drives refraction and specular ─────────────────────
+    float uL = texture(iState, uv - vec2(px.x, 0.0)).r;
+    float uR = texture(iState, uv + vec2(px.x, 0.0)).r;
+    float uU = texture(iState, uv - vec2(0.0, px.y)).r;
+    float uD = texture(iState, uv + vec2(0.0, px.y)).r;
+    vec2 grad = vec2(uR - uL, uD - uU);
+
+    // ── Liquid depth ──────────────────────────────────────────────────────────
+    // Map wave displacement to physical depth.
+    // u ∈ [−0.6, +0.6] → depth varies ±0.55 around base.
+    // Impulse (u > 0) → surface pushed up → less liquid overhead → shallower → neon blazes
+    // Trough  (u < 0) → liquid pulls down from neighbors → deeper → dustier
+    float depth = max(iDepth - u * 0.55, 0.04);
+
+    // ── Beer-Lambert per-channel extinction ───────────────────────────────────
+    // Coefficients are scaled so:
+    //   red   dies after ~0.5 depth units  (absorbed most aggressively)
+    //   green dies after ~1.3 depth units
+    //   blue  survives to ~4.0 depth units (most persistent)
+    // Result: thin liquid = full neon spectrum; thick = cold blue-violet veil
+    vec3 ext = vec3(iExtinction * 2.0, iExtinction * 0.72, iExtinction * 0.23);
+    vec3 T   = exp(-ext * depth);
+
+    // ── Chromatic refraction ──────────────────────────────────────────────────
+    float refStr = 0.011;
+    float chroma = 0.36;
+    vec3 term = vec3(
+        texture(iChannel0, clamp(uv + grad * refStr * (1.0 - chroma * 0.4), 0.001, 0.999)).r,
+        texture(iChannel0, clamp(uv + grad * refStr,                         0.001, 0.999)).g,
+        texture(iChannel0, clamp(uv + grad * refStr * (1.0 + chroma * 0.4), 0.001, 0.999)).b
+    );
+
+    // ── Neon source: terminal tinted to cyberpunk palette ─────────────────────
+    // The text beneath the liquid glows teal-cyan. Multiply gives the spectral
+    // source that Beer-Lambert then filters as it rises through the liquid.
+    vec3 neonTint = vec3(0.28, 0.92, 0.80);
+    vec3 neonSrc  = term * neonTint * 1.18;
+
+    // ── Vector background: 1989 corridor ──────────────────────────────────────
+    // A perspective-correct wireframe box hallway scrolling toward the viewer.
+    // Computed in world space: each surface (floor/ceiling/left/right wall) has
+    // its own UV derived from the screen pixel's ray direction.
+    // Added to neonSrc so Beer-Lambert filters it — thick liquid drowns it,
+    // thin liquid lets it glow. Zero effect on the wave physics.
+    {
+        // Fixed vanishing point — straight-ahead corridor
+        float vpX  = 0.50;
+        float vpY  = 0.46;
+        float hH   = 0.26, vH   = 0.20;
+        float GRID = 1.8;
+        float scrl = iScroll;
+
+        // Per-surface neon palette — each plane of the cyberspace has its own colour
+        vec3 colFloor = vec3(0.12, 0.95, 0.50);  // matrix green
+        vec3 colCeil  = vec3(0.52, 0.10, 1.00);  // cyber violet
+        vec3 colWall  = vec3(0.10, 0.58, 1.00);  // ICE blue
+        vec3 colRail  = vec3(0.70, 1.00, 0.85);  // hot terminal white-green (corner rails)
+        vec3 colPulse = vec3(0.20, 1.00, 0.65);  // data scan pulse teal
+
+        float rdx  = uv.x - vpX;
+        float rdy  = uv.y - vpY;
+        vec3  vBg  = vec3(0.0);
+
+        // Floor: matrix-green grid + luminous corner rails + fast data-pulse scan lines
+        if (rdy < -0.001 && abs(rdx) < (-rdy) * hH / vH) {
+            float wz   = vH / (-rdy);
+            float wx   = rdx * wz;
+            float fade = exp(-wz * 0.09) * smoothstep(0.0, 0.05, -rdy);
+            float gx   = abs(fract( wx         * GRID) - 0.5) * 2.0;
+            float gz   = abs(fract((wz - scrl) * GRID) - 0.5) * 2.0;
+            float g    = max(max(1.0 - smoothstep(0.0, 0.05, gx),
+                                 (1.0 - smoothstep(0.05, 0.14, gx)) * 0.28),
+                             max(1.0 - smoothstep(0.0, 0.05, gz),
+                                 (1.0 - smoothstep(0.05, 0.14, gz)) * 0.28));
+            vBg += g * fade * 0.17 * colFloor;
+            // Corner rail glow where floor meets each wall
+            float edgeT = abs(abs(rdx) / ((-rdy) * hH / vH) - 1.0);
+            vBg += smoothstep(0.06, 0.0, edgeT) * fade * 0.28 * colRail;
+            // Data pulse: sparse fast scan lines — security sweep feel
+            float gzP  = abs(fract((wz - scrl * 5.0) * 0.28) - 0.5) * 2.0;
+            vBg += (1.0 - smoothstep(0.0, 0.025, gzP)) * fade * 0.12 * colPulse;
+        }
+
+        // Ceiling: cyber-violet grid + corner rail glow
+        if (rdy > 0.001 && abs(rdx) < rdy * hH / vH) {
+            float wz   = vH / rdy;
+            float wx   = rdx * wz;
+            float fade = exp(-wz * 0.09) * smoothstep(0.0, 0.05, rdy);
+            float gx   = abs(fract( wx         * GRID) - 0.5) * 2.0;
+            float gz   = abs(fract((wz - scrl) * GRID) - 0.5) * 2.0;
+            float g    = max(max(1.0 - smoothstep(0.0, 0.05, gx),
+                                 (1.0 - smoothstep(0.05, 0.14, gx)) * 0.28),
+                             max(1.0 - smoothstep(0.0, 0.05, gz),
+                                 (1.0 - smoothstep(0.05, 0.14, gz)) * 0.28));
+            vBg += g * fade * 0.10 * colCeil;
+            float edgeT = abs(abs(rdx) / (rdy * hH / vH) - 1.0);
+            vBg += smoothstep(0.06, 0.0, edgeT) * fade * 0.22 * colRail;
+        }
+
+        // Right wall: ICE blue
+        if (rdx > 0.001 && abs(rdy) < rdx * vH / hH) {
+            float wz   = hH / rdx;
+            float wy   = rdy * wz;
+            float fade = exp(-wz * 0.09) * smoothstep(0.0, 0.05, rdx);
+            float gy   = abs(fract( wy         * GRID) - 0.5) * 2.0;
+            float gz   = abs(fract((wz - scrl) * GRID) - 0.5) * 2.0;
+            float g    = max(max(1.0 - smoothstep(0.0, 0.05, gy),
+                                 (1.0 - smoothstep(0.05, 0.14, gy)) * 0.28),
+                             max(1.0 - smoothstep(0.0, 0.05, gz),
+                                 (1.0 - smoothstep(0.05, 0.14, gz)) * 0.28));
+            vBg += g * fade * 0.13 * colWall;
+        }
+
+        // Left wall: ICE blue
+        if (rdx < -0.001 && abs(rdy) < (-rdx) * vH / hH) {
+            float wz   = hH / (-rdx);
+            float wy   = rdy * wz;
+            float fade = exp(-wz * 0.09) * smoothstep(0.0, 0.05, -rdx);
+            float gy   = abs(fract( wy         * GRID) - 0.5) * 2.0;
+            float gz   = abs(fract((wz - scrl) * GRID) - 0.5) * 2.0;
+            float g    = max(max(1.0 - smoothstep(0.0, 0.05, gy),
+                                 (1.0 - smoothstep(0.05, 0.14, gy)) * 0.28),
+                             max(1.0 - smoothstep(0.0, 0.05, gz),
+                                 (1.0 - smoothstep(0.05, 0.14, gz)) * 0.28));
+            vBg += g * fade * 0.13 * colWall;
+        }
+
+        // Back-wall frame: terminal hot green — the aperture at the end of the tunnel
+        float bx   = abs(rdx) / hH;
+        float by   = abs(rdy) / vH;
+        float bmax = max(bx, by);
+        vBg += (1.0 - smoothstep(0.26, 0.30, bmax)) * smoothstep(0.18, 0.22, bmax) * 0.14 * colRail;
+
+        neonSrc += vBg;   // colors already baked per surface — no global tint
+    }
+
+    // ── Direct transmitted light ──────────────────────────────────────────────
+    vec3 direct = neonSrc * T;
+
+    // ── Scattered ambient: dusty veil, grows with depth ───────────────────────
+    // Single-scatter approximation. The scattered light is cool dark violet —
+    // the colour of neon diffused through 3 cm of charged rain.
+    float scatter  = 1.0 - exp(-iScatter * depth);
+    vec3  dustVeil = vec3(0.13, 0.11, 0.24) * scatter;
+
+    vec3 color = direct + dustVeil;
+
+    // ── Bloom: neon smoke — light scatters outward through thick liquid ───────
+    // Rather than gating bloom on thinness, the scatter drives it: the thicker
+    // the liquid, the more neon light from nearby pixels diffuses into this one.
+    // Thin regions: tight, bright halo. Thick regions: wide, smoky diffusion.
+    vec3 bloom = vec3(0.0);
+    for (int i = 0; i < 8; i++) {
+        float a   = 6.28318530718 * float(i) * 0.125;  // 2π * i/8
+        vec2  dir = vec2(cos(a), sin(a));
+        vec3  c1  = texture(iChannel0, clamp(uv + dir * px *  8.0, 0.001, 0.999)).rgb;
+        vec3  c2  = texture(iChannel0, clamp(uv + dir * px * 18.0, 0.001, 0.999)).rgb;
+        bloom += (c1 + c2 * 0.45) * neonTint;
+    }
+    // Thick liquid = more scatter = more bloom received (smoke around neon)
+    bloom *= iBloom * 0.030 * (0.15 + scatter * 1.30);
+    color += bloom;
+
+    // ── Specular: wave facets catch and flash the neon ────────────────────────
+    float nMag = length(grad);
+    vec3  N    = normalize(vec3(-grad * 5.0, 1.0));
+    vec3  L    = normalize(vec3(-0.30, -0.60, 1.80));
+    vec3  H    = normalize(L + vec3(0.0, 0.0, 1.0));
+    float spec = pow(max(dot(N, H), 0.0), 80.0) * nMag * 10.0;
+    color += vec3(0.28, 0.96, 0.82) * spec * 0.22;
+
+    // ── Vignette ──────────────────────────────────────────────────────────────
+    color *= 1.0 - 0.28 * dot(uv - 0.5, uv - 0.5);
+
+    fragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
+}`;
+
+// ─── Shader compilation ───────────────────────────────────────────────────────
+function compileShader(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+        console.error('Shader error:', gl.getShaderInfoLog(s));
+    return s;
+}
+function makeProgram(fsSrc) {
+    const prog = gl.createProgram();
+    gl.attachShader(prog, compileShader(gl.VERTEX_SHADER, VS));
+    gl.attachShader(prog, compileShader(gl.FRAGMENT_SHADER, fsSrc));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
+        console.error('Link error:', gl.getProgramInfoLog(prog));
+    return prog;
+}
+
+const waveProg    = makeProgram(WAVE_FS);
+const displayProg = makeProgram(DISPLAY_FS);
+
+// ─── Cached uniform locations ─────────────────────────────────────────────────
+const wU = {
+    iState:      gl.getUniformLocation(waveProg, 'iState'),
+    iResolution: gl.getUniformLocation(waveProg, 'iResolution'),
+    iImpulseUV:  gl.getUniformLocation(waveProg, 'iImpulseUV'),
+    iImpulseStr: gl.getUniformLocation(waveProg, 'iImpulseStr'),
+    iTime:       gl.getUniformLocation(waveProg, 'iTime'),
+    iSpeed:      gl.getUniformLocation(waveProg, 'iSpeed'),
+    iDamp:       gl.getUniformLocation(waveProg, 'iDamp'),
+    iAmplitude:  gl.getUniformLocation(waveProg, 'iAmplitude'),
+};
+const dU = {
+    iChannel0:   gl.getUniformLocation(displayProg, 'iChannel0'),
+    iState:      gl.getUniformLocation(displayProg, 'iState'),
+    iResolution: gl.getUniformLocation(displayProg, 'iResolution'),
+    iDepth:      gl.getUniformLocation(displayProg, 'iDepth'),
+    iExtinction: gl.getUniformLocation(displayProg, 'iExtinction'),
+    iScatter:    gl.getUniformLocation(displayProg, 'iScatter'),
+    iBloom:      gl.getUniformLocation(displayProg, 'iBloom'),
+    iScroll:     gl.getUniformLocation(displayProg, 'iScroll'),
+    iTick:       gl.getUniformLocation(displayProg, 'iTick'),
+};
+
+// ─── Full-screen quad ─────────────────────────────────────────────────────────
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+    -1,-1, 1,-1, -1,1,  1,-1, 1,1, -1,1
+]), gl.STATIC_DRAW);
+
+function bindQuad(prog) {
+    const a = gl.getAttribLocation(prog, 'aPos');
+    gl.enableVertexAttribArray(a);
+    gl.vertexAttribPointer(a, 2, gl.FLOAT, false, 0, 0);
+}
+
+// ─── Float framebuffers (RGBA16F ping-pong) ───────────────────────────────────
+function makeFloatFB(W, H) {
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, W, H, 0, gl.RGBA, gl.HALF_FLOAT, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const fb = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return { tex, fb };
+}
+
+// ─── Terminal texture ─────────────────────────────────────────────────────────
+const termTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, termTex);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+let read, write;
+
+function resize() {
+    const W = window.innerWidth, H = window.innerHeight;
+    textCanvas.width = W; textCanvas.height = H;
+    glCanvas.width   = W; glCanvas.height   = H;
+    gl.viewport(0, 0, W, H);
+    if (read)  { gl.deleteTexture(read.tex);  gl.deleteFramebuffer(read.fb);  }
+    if (write) { gl.deleteTexture(write.tex); gl.deleteFramebuffer(write.fb); }
+    read  = makeFloatFB(W, H);
+    write = makeFloatFB(W, H);
+}
+
+['input','keydown','keyup','click','mouseup'].forEach(ev =>
+    input.addEventListener(ev, drawText));
+
+// ─── Render loop ──────────────────────────────────────────────────────────────
+const t0  = performance.now();
+let lastT = performance.now();
+
+function frame() {
+    const now = performance.now();
+    const dt  = Math.min((now - lastT) / 1000.0, 0.05);
+    lastT = now;
+
+    // Jerk → accel → velocity → position. All decay to 0 → full stop when typing stops.
+    jerk      *= Math.exp(-2.5 * dt);               // jerk fades fast (~0.3 s half-life)
+    accel     += jerk * dt;
+    accel      = Math.min(accel, 1.2);
+    accel     *= Math.exp(-0.9 * dt);               // accel fades medium (~0.8 s half-life)
+    velocity  += accel * dt;
+    velocity   = Math.min(velocity, 0.55);
+    velocity  *= Math.exp(-0.4 * dt);               // velocity fades slow (~1.7 s half-life)
+    if (velocity < 0.0008) velocity = 0.0;          // snap to full stop
+    scrollPos += velocity * dt;
+
+    const W = glCanvas.width, H = glCanvas.height;
+
+    drawText();
+
+    // Upload terminal texture
+    gl.bindTexture(gl.TEXTURE_2D, termTex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, textCanvas);
+
+    // ── Wave compute pass ─────────────────────────────────────────────────────
+    gl.bindFramebuffer(gl.FRAMEBUFFER, write.fb);
+    gl.viewport(0, 0, W, H);
+    gl.useProgram(waveProg);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    bindQuad(waveProg);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, read.tex);
+    gl.uniform1i(wU.iState,      0);
+    gl.uniform2f(wU.iResolution, W, H);
+    gl.uniform2f(wU.iImpulseUV,  impulseUV[0], impulseUV[1]);
+    gl.uniform1f(wU.iImpulseStr, impStr);
+    gl.uniform1f(wU.iTime,       (now - t0) / 1000.0);
+    gl.uniform1f(wU.iSpeed,      parseFloat(sSpeed.value));
+    gl.uniform1f(wU.iDamp,       parseFloat(sDamp.value));
+    gl.uniform1f(wU.iAmplitude,  parseFloat(sAmp.value));
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    impStr *= Math.exp(-IMP_DECAY * dt);
+    if (impStr < 0.001) impStr = 0;
+
+    [read, write] = [write, read];
+
+    // ── Display pass ──────────────────────────────────────────────────────────
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, W, H);
+    gl.useProgram(displayProg);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    bindQuad(displayProg);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, termTex);
+    gl.uniform1i(dU.iChannel0, 0);
+
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, read.tex);
+    gl.uniform1i(dU.iState, 1);
+
+    gl.uniform2f(dU.iResolution, W, H);
+    gl.uniform1f(dU.iDepth,      parseFloat(sDepth.value));
+    gl.uniform1f(dU.iExtinction, parseFloat(sExt.value));
+    gl.uniform1f(dU.iScatter,    parseFloat(sScatter.value));
+    gl.uniform1f(dU.iBloom,      parseFloat(sBloom.value));
+    gl.uniform1f(dU.iScroll,     scrollPos);
+    gl.uniform1f(dU.iTick,       (now - t0) / 1000.0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    requestAnimationFrame(frame);
+}
+
+window.addEventListener('resize', resize);
+resize();
+input.focus();
+frame();
+</script>
+</body>
+</html>

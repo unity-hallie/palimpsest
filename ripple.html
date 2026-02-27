@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Ripple — wave equation on terminal text</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #F0EBE1; width: 100vw; height: 100vh; overflow: hidden; }
+#container { position: relative; width: 100vw; height: 100vh; cursor: text; }
+#glcanvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+#input {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    opacity: 0; cursor: text; z-index: 10;
+    resize: none; border: none; outline: none;
+    background: transparent; color: transparent;
+    font-size: 15px; line-height: 22px;
+    font-family: monospace; padding: 16px;
+    caret-color: transparent;
+}
+#hint {
+    position: absolute; bottom: 14px; right: 18px;
+    color: rgba(58,53,48,0.28); font: 11px/1.5 monospace;
+    pointer-events: none; z-index: 20; text-align: right;
+}
+#controls {
+    position: fixed; bottom: 14px; left: 18px;
+    color: rgba(58,53,48,0.55);
+    font: 11px/2.0 "SF Mono","JetBrains Mono","Fira Code",monospace;
+    pointer-events: all; z-index: 30; user-select: none;
+}
+#controls label {
+    display: grid;
+    grid-template-columns: 10ch 150px 5ch;
+    gap: 6px; align-items: center;
+}
+#controls input[type=range] {
+    width: 150px; height: 3px;
+    accent-color: rgba(139,115,85,0.75);
+    cursor: pointer;
+}
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="glcanvas"></canvas>
+  <textarea id="input" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
+  <div id="hint">ripple · type to drop stones in the surface</div>
+</div>
+<div id="controls">
+  <label>speed     <input type="range" id="sSpeed"   min="0.05" max="0.45" step="0.01"   value="0.24"> <span id="vSpeed">0.24</span></label>
+  <label>damping   <input type="range" id="sDamp"    min="0"    max="0.020" step="0.001" value="0.003"><span id="vDamp">0.003</span></label>
+  <label>amplitude <input type="range" id="sAmp"     min="0.2"  max="4.0"  step="0.1"   value="1.0"> <span id="vAmp">1.0</span></label>
+  <label>non-newt  <input type="range" id="sNonNewt" min="0"    max="1"    step="0.05"   value="0">   <span id="vNonNewt">0.00</span></label>
+  <label>plasticity<input type="range" id="sPlastic"  min="0"    max="1"    step="0.05"   value="0">   <span id="vPlastic">0.00</span></label>
+  <label>turbidity <input type="range" id="sTurb"    min="0"    max="1"    step="0.05"   value="0">   <span id="vTurb">0.00</span></label>
+  <label>chroma    <input type="range" id="sChroma"  min="0"    max="1"    step="0.05"   value="0.40"><span id="vChroma">0.40</span></label>
+</div>
+<script>
+// ─── Sliders ──────────────────────────────────────────────────────────────────
+function bindSlider(id, valId, decimals) {
+    const el  = document.getElementById(id);
+    const vEl = document.getElementById(valId);
+    el.addEventListener('input', () => { vEl.textContent = parseFloat(el.value).toFixed(decimals); });
+    return el;
+}
+const sSpeed   = bindSlider('sSpeed',   'vSpeed',   2);
+const sDamp    = bindSlider('sDamp',    'vDamp',    3);
+const sAmp     = bindSlider('sAmp',     'vAmp',     1);
+const sNonNewt = bindSlider('sNonNewt', 'vNonNewt', 2);
+const sPlastic = bindSlider('sPlastic', 'vPlastic', 2);
+const sTurb    = bindSlider('sTurb',    'vTurb',    2);
+const sChroma  = bindSlider('sChroma',  'vChroma',  2);
+
+// ─── Text canvas ──────────────────────────────────────────────────────────────
+const textCanvas = document.createElement('canvas');
+const tx = textCanvas.getContext('2d');
+
+const FONT_SIZE   = 15;
+const LINE_HEIGHT = 22;
+const PAD         = 16;
+const FONT        = `${FONT_SIZE}px "SF Mono","JetBrains Mono","Fira Code","Consolas",monospace`;
+
+tx.font = FONT;
+const CHAR_W = tx.measureText('M').width;
+
+const DEMO = `  ripple — wave equation on terminal text
+
+  each keystroke is a stone dropped into water.
+  the wave propagates outward, refracts the text,
+  then slowly damps back to stillness.
+
+  the equation:
+
+    u_new = 2u − u_old + c²∇²u − γ(u − u_old)
+
+  u   = surface displacement at each pixel
+  c   = wave propagation speed
+  γ   = viscous damping  (high → honey, low → water)
+  ∇²  = Laplacian (average of 4 neighbors minus center)
+
+  non-newtonian mode: γ shrinks as local energy rises.
+  still regions stay thick; active waves flow freely.
+
+  the terminal is the pond.
+  your words are the stones.
+
+  type here to disturb the surface.
+`;
+
+const input = document.getElementById('input');
+input.value = DEMO;
+
+function drawText() {
+    const W = textCanvas.width, H = textCanvas.height;
+    tx.fillStyle = '#F0EBE1';
+    tx.fillRect(0, 0, W, H);
+    tx.font = FONT;
+
+    const cols  = Math.floor((W - PAD * 2) / CHAR_W);
+    const lines = input.value.split('\n');
+
+    const sel = input.selectionStart;
+    let cursorLine = 0, cursorCol = 0, counted = 0;
+    for (let li = 0; li < lines.length; li++) {
+        if (counted + lines[li].length >= sel) {
+            cursorLine = li; cursorCol = sel - counted; break;
+        }
+        counted += lines[li].length + 1;
+    }
+
+    const focused = document.activeElement === input;
+    const blink   = Math.floor(Date.now() / 530) % 2 === 0;
+
+    let y = PAD + FONT_SIZE;
+    for (let li = 0; li < lines.length; li++) {
+        let line = lines[li];
+        let col  = 0;
+        while (line.length > cols) {
+            tx.fillStyle = '#3A3530';
+            tx.fillText(line.slice(0, cols), PAD, y);
+            line = line.slice(cols); col += cols; y += LINE_HEIGHT;
+        }
+        tx.fillStyle = '#3A3530';
+        tx.fillText(line, PAD, y);
+
+        if (li === cursorLine && focused && blink) {
+            const cx = PAD + cursorCol * CHAR_W;
+            tx.fillStyle = 'rgba(139,115,85,0.85)';
+            tx.fillRect(cx, y - FONT_SIZE + 2, Math.max(CHAR_W * 0.7, 2), LINE_HEIGHT - 3);
+            tx.fillStyle = '#F0EBE1';
+            const ch = line[cursorCol - col] || '';
+            if (ch) tx.fillText(ch, cx, y);
+        }
+        y += LINE_HEIGHT;
+    }
+}
+
+// ─── Cursor UV ────────────────────────────────────────────────────────────────
+function getCursorUV() {
+    const W = textCanvas.width, H = textCanvas.height;
+    const before = input.value.substring(0, input.selectionStart);
+    const lines  = before.split('\n');
+    const li     = lines.length - 1;
+    const col    = lines[li].length;
+    const px     = PAD + col * CHAR_W;
+    const py     = PAD + li * LINE_HEIGHT + LINE_HEIGHT * 0.5;
+    return [px / W, 1.0 - py / H];   // flip Y for WebGL
+}
+
+// Impulse state
+let impulseUV = [0.5, 0.5];
+let impStr    = 0.0;
+const IMP_DECAY = 12.0;   // per second
+
+input.addEventListener('input', () => {
+    impulseUV = getCursorUV();
+    impStr = 1.0;
+});
+input.addEventListener('keydown', e => {
+    if (e.key === 'Backspace' || e.key === 'Delete' || e.key === 'Enter') {
+        impulseUV = getCursorUV();
+        impStr = 0.7;
+    }
+});
+
+// ─── WebGL2 ───────────────────────────────────────────────────────────────────
+const glCanvas = document.getElementById('glcanvas');
+const gl = glCanvas.getContext('webgl2');
+if (!gl) {
+    document.body.innerHTML = '<p style="color:red;font-family:monospace;padding:32px">WebGL2 not available</p>';
+}
+gl.getExtension('EXT_color_buffer_float');
+
+// ─── Shaders ──────────────────────────────────────────────────────────────────
+const VS = `#version 300 es
+in vec2 aPos;
+void main() { gl_Position = vec4(aPos, 0.0, 1.0); }`;
+
+// Wave equation compute pass — ping-pong state: R = u_curr, G = u_prev
+const WAVE_FS = `#version 300 es
+precision highp float;
+uniform sampler2D iState;
+uniform vec2      iResolution;
+uniform vec2      iImpulseUV;
+uniform float     iImpulseStr;
+uniform float     iTime;
+uniform float     iSpeed;        // c² — wave speed squared
+uniform float     iDamp;         // base viscous damping γ
+uniform float     iAmplitude;    // impulse & clamp scale
+uniform float     iNonNewtonian; // shear-thinning strength (0 = Newtonian)
+uniform float     iPlasticity;   // 0 = normal, 1 = peaks hold shape
+out vec4 fragColor;
+
+float hash21(vec2 p) {
+    p = fract(p * vec2(127.1, 311.7));
+    p += dot(p, p.yx + 19.19);
+    return fract(p.x * p.y);
+}
+
+void main() {
+    vec2  uv = gl_FragCoord.xy / iResolution.xy;
+    vec2  px = 1.0 / iResolution.xy;
+
+    float u     = texture(iState, uv).r;
+    float u_old = texture(iState, uv).g;
+
+    float uL = texture(iState, uv - vec2(px.x, 0.0)).r;
+    float uR = texture(iState, uv + vec2(px.x, 0.0)).r;
+    float uU = texture(iState, uv - vec2(0.0, px.y)).r;
+    float uD = texture(iState, uv + vec2(0.0, px.y)).r;
+
+    // Non-Newtonian shear-thinning: γ drops as local energy rises.
+    // Energy = sqrt(displacement² + velocity²) — both contribute.
+    float vel    = u - u_old;
+    float energy = sqrt(u * u + vel * vel);
+    float damp   = iDamp / (1.0 + iNonNewtonian * energy * 10.0);
+
+    // Plasticity: settled regions resist the restoring (Laplacian) force.
+    // moving=1 when actively flowing, 0 when still → suppress lap when still.
+    float moving    = smoothstep(0.0, 0.008, abs(vel));
+    float restoring = mix(1.0 - iPlasticity, 1.0, moving);
+
+    // u_new = 2u - u_old + c²∇²u - γ(u - u_old)
+    float lap   = (uL + uR + uU + uD - 4.0 * u) * restoring;
+    float u_new = 2.0*u - u_old + iSpeed*lap - damp*vel;
+
+    // Keystroke impulse: Gaussian centered at cursor
+    float d   = length(uv - iImpulseUV);
+    float sig = 0.022;
+    u_new += iImpulseStr * exp(-d*d / (2.0*sig*sig)) * 0.35 * iAmplitude;
+
+    // Occasional ambient drops — one candidate per frame, fires ~1x/sec
+    float tSlot  = floor(iTime * 60.0);
+    float dropRng = hash21(vec2(tSlot, tSlot * 0.7));
+    if (dropRng > 0.983) {
+        vec2  center = vec2(hash21(vec2(tSlot * 1.3, 7.1)),
+                            hash21(vec2(tSlot * 2.1, 3.7)));
+        float da   = length(uv - center);
+        float siga = 0.012;
+        u_new += exp(-da*da / (2.0*siga*siga)) * 0.07 * iAmplitude;
+    }
+
+    // Absorbing boundary — prevents edge reflections
+    float bx = smoothstep(0.0, 0.04, uv.x) * smoothstep(1.0, 0.96, uv.x);
+    float by = smoothstep(0.0, 0.04, uv.y) * smoothstep(1.0, 0.96, uv.y);
+
+    float maxU = 0.6 * iAmplitude;
+    u_new = clamp(u_new * bx * by, -maxU, maxU);
+
+    // R = new u, G = current u (becomes u_old next frame)
+    fragColor = vec4(u_new, u, 0.0, 1.0);
+}`;
+
+// Display pass — refract terminal by wave surface gradient
+const DISPLAY_FS = `#version 300 es
+precision mediump float;
+uniform sampler2D iChannel0;
+uniform sampler2D iState;
+uniform vec2      iResolution;
+uniform float     iChroma;
+uniform float     iTurbidity;
+out vec4 fragColor;
+
+void main() {
+    vec2 uv = gl_FragCoord.xy / iResolution.xy;
+    vec2 px = 2.0 / iResolution.xy;
+
+    vec2  stateSample = texture(iState, uv).rg;
+    float u     = stateSample.r;
+    float u_old = stateSample.g;
+
+    // Surface gradient
+    float uL = texture(iState, uv - vec2(px.x, 0.0)).r;
+    float uR = texture(iState, uv + vec2(px.x, 0.0)).r;
+    float uU = texture(iState, uv - vec2(0.0, px.y)).r;
+    float uD = texture(iState, uv + vec2(0.0, px.y)).r;
+    vec2 grad = vec2(uR - uL, uD - uU);
+
+    // Chromatic aberration: R/G/B refracted by slightly different amounts
+    float refStr = 0.016;
+    vec3 color = vec3(
+        texture(iChannel0, clamp(uv + grad * refStr * (1.0 - iChroma * 0.4), 0.001, 0.999)).r,
+        texture(iChannel0, clamp(uv + grad * refStr,                          0.001, 0.999)).g,
+        texture(iChannel0, clamp(uv + grad * refStr * (1.0 + iChroma * 0.4), 0.001, 0.999)).b
+    );
+
+    // Specular highlight — Blinn-Phong from upper-left light
+    float nMag = length(grad);
+    vec3  N    = normalize(vec3(-grad * 5.0, 1.0));
+    vec3  L    = normalize(vec3(-0.4, -0.7, 1.5));
+    vec3  H    = normalize(L + vec3(0.0, 0.0, 1.0));
+    float spec = pow(max(dot(N, H), 0.0), 60.0) * nMag * 8.0;
+    color += vec3(1.00, 0.97, 0.90) * spec * 0.18;
+
+    // Iridescent shimmer at crests and troughs
+    float crest  = smoothstep(0.0, 0.4,  u);
+    float trough = smoothstep(0.0, 0.4, -u);
+    color += vec3(0.30, 0.55, 1.00) * crest  * 0.06;
+    color -= vec3(0.08, 0.04, 0.00) * trough * 0.025;
+
+    // Turbidity: still water = cool deep tint; active = warm milky cloud.
+    // Uses velocity (u - u_old) + displacement as energy proxy.
+    float energy   = sqrt(u * u + (u - u_old) * (u - u_old));
+    float activity = smoothstep(0.0, 0.35, energy * 3.0);
+    vec3  depthCol = vec3(0.86, 0.90, 0.96);  // cool still-water depth
+    vec3  cloudCol = vec3(0.99, 0.97, 0.94);  // warm disturbed turbidity
+    color = mix(color, mix(depthCol, cloudCol, activity), iTurbidity * 0.32);
+
+    fragColor = vec4(clamp(color, 0.0, 1.0), texture(iChannel0, uv).a);
+}`;
+
+function compileShader(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+        console.error('Shader error:', gl.getShaderInfoLog(s));
+    return s;
+}
+
+function makeProgram(fsSrc) {
+    const prog = gl.createProgram();
+    gl.attachShader(prog, compileShader(gl.VERTEX_SHADER, VS));
+    gl.attachShader(prog, compileShader(gl.FRAGMENT_SHADER, fsSrc));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
+        console.error('Link error:', gl.getProgramInfoLog(prog));
+    return prog;
+}
+
+const waveProg    = makeProgram(WAVE_FS);
+const displayProg = makeProgram(DISPLAY_FS);
+
+// ─── Cached uniform locations ─────────────────────────────────────────────────
+const wU = {
+    iState:        gl.getUniformLocation(waveProg, 'iState'),
+    iResolution:   gl.getUniformLocation(waveProg, 'iResolution'),
+    iImpulseUV:    gl.getUniformLocation(waveProg, 'iImpulseUV'),
+    iImpulseStr:   gl.getUniformLocation(waveProg, 'iImpulseStr'),
+    iTime:         gl.getUniformLocation(waveProg, 'iTime'),
+    iSpeed:        gl.getUniformLocation(waveProg, 'iSpeed'),
+    iDamp:         gl.getUniformLocation(waveProg, 'iDamp'),
+    iAmplitude:    gl.getUniformLocation(waveProg, 'iAmplitude'),
+    iNonNewtonian: gl.getUniformLocation(waveProg, 'iNonNewtonian'),
+    iPlasticity:   gl.getUniformLocation(waveProg, 'iPlasticity'),
+};
+const dU = {
+    iChannel0:   gl.getUniformLocation(displayProg, 'iChannel0'),
+    iState:      gl.getUniformLocation(displayProg, 'iState'),
+    iResolution: gl.getUniformLocation(displayProg, 'iResolution'),
+    iChroma:     gl.getUniformLocation(displayProg, 'iChroma'),
+    iTurbidity:  gl.getUniformLocation(displayProg, 'iTurbidity'),
+};
+
+// Full-screen quad
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+    -1,-1, 1,-1, -1,1,  1,-1, 1,1, -1,1
+]), gl.STATIC_DRAW);
+
+function bindQuad(prog) {
+    const a = gl.getAttribLocation(prog, 'aPos');
+    gl.enableVertexAttribArray(a);
+    gl.vertexAttribPointer(a, 2, gl.FLOAT, false, 0, 0);
+}
+
+// ─── Float framebuffers (RGBA16F ping-pong) ───────────────────────────────────
+function makeFloatFB(W, H) {
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, W, H, 0, gl.RGBA, gl.HALF_FLOAT, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const fb = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return { tex, fb };
+}
+
+// Terminal texture
+const termTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, termTex);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+let read, write;
+
+function resize() {
+    const W = window.innerWidth, H = window.innerHeight;
+    textCanvas.width = W; textCanvas.height = H;
+    glCanvas.width   = W; glCanvas.height   = H;
+    gl.viewport(0, 0, W, H);
+    if (read)  { gl.deleteTexture(read.tex);  gl.deleteFramebuffer(read.fb);  }
+    if (write) { gl.deleteTexture(write.tex); gl.deleteFramebuffer(write.fb); }
+    read  = makeFloatFB(W, H);
+    write = makeFloatFB(W, H);
+}
+
+['input','keydown','keyup','click','mouseup'].forEach(ev =>
+    input.addEventListener(ev, drawText));
+
+// ─── Render loop ──────────────────────────────────────────────────────────────
+const t0  = performance.now();
+let lastT = performance.now();
+
+function frame() {
+    const now = performance.now();
+    const dt  = Math.min((now - lastT) / 1000.0, 0.05);
+    lastT = now;
+
+    const W = glCanvas.width, H = glCanvas.height;
+
+    drawText();
+
+    // Upload terminal texture
+    gl.bindTexture(gl.TEXTURE_2D, termTex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, textCanvas);
+
+    // ── Wave compute pass ─────────────────────────────────────────────────────
+    gl.bindFramebuffer(gl.FRAMEBUFFER, write.fb);
+    gl.viewport(0, 0, W, H);
+    gl.useProgram(waveProg);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    bindQuad(waveProg);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, read.tex);
+    gl.uniform1i(wU.iState, 0);
+    gl.uniform2f(wU.iResolution, W, H);
+    gl.uniform2f(wU.iImpulseUV,  impulseUV[0], impulseUV[1]);
+    gl.uniform1f(wU.iImpulseStr, impStr);
+    gl.uniform1f(wU.iTime,       (now - t0) / 1000.0);
+    gl.uniform1f(wU.iSpeed,       parseFloat(sSpeed.value));
+    gl.uniform1f(wU.iDamp,        parseFloat(sDamp.value));
+    gl.uniform1f(wU.iAmplitude,   parseFloat(sAmp.value));
+    gl.uniform1f(wU.iNonNewtonian,parseFloat(sNonNewt.value));
+    gl.uniform1f(wU.iPlasticity,  parseFloat(sPlastic.value));
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    impStr *= Math.exp(-IMP_DECAY * dt);
+    if (impStr < 0.001) impStr = 0;
+
+    [read, write] = [write, read];
+
+    // ── Display pass ──────────────────────────────────────────────────────────
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, W, H);
+    gl.useProgram(displayProg);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    bindQuad(displayProg);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, termTex);
+    gl.uniform1i(dU.iChannel0, 0);
+
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, read.tex);
+    gl.uniform1i(dU.iState, 1);
+
+    gl.uniform2f(dU.iResolution, W, H);
+    gl.uniform1f(dU.iChroma,    parseFloat(sChroma.value));
+    gl.uniform1f(dU.iTurbidity, parseFloat(sTurb.value));
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    requestAnimationFrame(frame);
+}
+
+window.addEventListener('resize', resize);
+resize();
+input.focus();
+frame();
+</script>
+</body>
+</html>

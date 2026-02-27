@@ -65,92 +65,93 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // ── Source: terminal text boosted as neon emitter ─────────────────────────
     vec3 neonSrc = term * vec3(1.08, 1.12, 1.16) + vec3(0.04, 0.04, 0.06);
 
-    // ── 1989 wireframe corridor ───────────────────────────────────────────────
-    // Perspective-correct box hallway. Per-surface neon palette.
+    // ── Hackers cityscape — camera flies over terminal-driven skyline ─────────
+    // Building heights = terminal column luminance. Dense code = tall towers.
+    // Left buildings: matrix-green windows. Right: ICE-blue/teal. Rooflines glow.
     {
-        float vpX  = 0.50;
-        float vpY  = 0.46;
-        float hH   = 0.26, vH = 0.20;
-        float GRID = 1.8;
-        // Constant drift — no wave-energy term (oscillating waves would cause backward scroll)
-        float scrl = iTime * 0.08;
-
-        // Per-surface neon palette
-        vec3 colFloor = vec3(0.12, 0.95, 0.50);  // matrix green
-        vec3 colCeil  = vec3(0.52, 0.10, 1.00);  // cyber violet
-        vec3 colWall  = vec3(0.10, 0.58, 1.00);  // ICE blue
-        vec3 colRail  = vec3(0.70, 1.00, 0.85);  // hot terminal white-green (corner rails)
-        vec3 colPulse = vec3(0.20, 1.00, 0.65);  // data scan pulse teal
-
+        float vpX  = 0.50, vpY = 0.44;
+        float camH = 0.30;   // camera height above ground
+        float stW  = 0.28;   // half street width
+        float BLEN = 0.50;   // building block depth
+        float scrl = iTime * 0.08 + texture(iChannel2, vec2(0.5, 0.5)).a;
         float rdx  = uv.x - vpX;
         float rdy  = uv.y - vpY;
-        vec3  vBg  = vec3(0.0);
+        vec3  city = vec3(0.0);
 
-        // Floor: matrix-green grid + corner rail + data pulse
-        if (rdy < -0.001 && abs(rdx) < (-rdy) * hH / vH) {
-            float wz   = vH / (-rdy);
-            float wx   = rdx * wz;
-            float fade = exp(-wz * 0.09) * smoothstep(0.0, 0.05, -rdy);
-            float gx   = abs(fract( wx         * GRID) - 0.5) * 2.0;
-            float gz   = abs(fract((wz - scrl) * GRID) - 0.5) * 2.0;
-            float g    = max(max(1.0 - smoothstep(0.0, 0.05, gx),
-                                 (1.0 - smoothstep(0.05, 0.14, gx)) * 0.28),
-                             max(1.0 - smoothstep(0.0, 0.05, gz),
-                                 (1.0 - smoothstep(0.05, 0.14, gz)) * 0.28));
-            vBg += g * fade * 0.17 * colFloor;
-            float edgeT = abs(abs(rdx) / ((-rdy) * hH / vH) - 1.0);
-            vBg += smoothstep(0.06, 0.0, edgeT) * fade * 0.28 * colRail;
-            float gzP  = abs(fract((wz - scrl * 5.0) * 0.28) - 0.5) * 2.0;
-            vBg += (1.0 - smoothstep(0.0, 0.025, gzP)) * fade * 0.12 * colPulse;
-        }
-        // Ceiling: cyber-violet grid + corner rail
-        if (rdy > 0.001 && abs(rdx) < rdy * hH / vH) {
-            float wz   = vH / rdy;
-            float wx   = rdx * wz;
-            float fade = exp(-wz * 0.09) * smoothstep(0.0, 0.05, rdy);
-            float gx   = abs(fract( wx         * GRID) - 0.5) * 2.0;
-            float gz   = abs(fract((wz - scrl) * GRID) - 0.5) * 2.0;
-            float g    = max(max(1.0 - smoothstep(0.0, 0.05, gx),
-                                 (1.0 - smoothstep(0.05, 0.14, gx)) * 0.28),
-                             max(1.0 - smoothstep(0.0, 0.05, gz),
-                                 (1.0 - smoothstep(0.05, 0.14, gz)) * 0.28));
-            vBg += g * fade * 0.10 * colCeil;
-            float edgeT = abs(abs(rdx) / (rdy * hH / vH) - 1.0);
-            vBg += smoothstep(0.06, 0.0, edgeT) * fade * 0.22 * colRail;
-        }
-        // Right wall: ICE blue
-        if (rdx > 0.001 && abs(rdy) < rdx * vH / hH) {
-            float wz   = hH / rdx;
-            float wy   = rdy * wz;
-            float fade = exp(-wz * 0.09) * smoothstep(0.0, 0.05, rdx);
-            float gy   = abs(fract( wy         * GRID) - 0.5) * 2.0;
-            float gz   = abs(fract((wz - scrl) * GRID) - 0.5) * 2.0;
-            float g    = max(max(1.0 - smoothstep(0.0, 0.05, gy),
-                                 (1.0 - smoothstep(0.05, 0.14, gy)) * 0.28),
-                             max(1.0 - smoothstep(0.0, 0.05, gz),
-                                 (1.0 - smoothstep(0.05, 0.14, gz)) * 0.28));
-            vBg += g * fade * 0.13 * colWall;
-        }
-        // Left wall: ICE blue
-        if (rdx < -0.001 && abs(rdy) < (-rdx) * vH / hH) {
-            float wz   = hH / (-rdx);
-            float wy   = rdy * wz;
-            float fade = exp(-wz * 0.09) * smoothstep(0.0, 0.05, -rdx);
-            float gy   = abs(fract( wy         * GRID) - 0.5) * 2.0;
-            float gz   = abs(fract((wz - scrl) * GRID) - 0.5) * 2.0;
-            float g    = max(max(1.0 - smoothstep(0.0, 0.05, gy),
-                                 (1.0 - smoothstep(0.05, 0.14, gy)) * 0.28),
-                             max(1.0 - smoothstep(0.0, 0.05, gz),
-                                 (1.0 - smoothstep(0.05, 0.14, gz)) * 0.28));
-            vBg += g * fade * 0.13 * colWall;
-        }
-        // Back-wall frame: terminal hot green — aperture at end of tunnel
-        float bx   = abs(rdx) / hH;
-        float by   = abs(rdy) / vH;
-        float bmax = max(bx, by);
-        vBg += (1.0 - smoothstep(0.26, 0.30, bmax)) * smoothstep(0.18, 0.22, bmax) * 0.14 * colRail;
+        float wzL = (rdx < -0.001) ? stW / (-rdx) : 1e6;
+        float wzR = (rdx >  0.001) ? stW /   rdx  : 1e6;
+        float wzG = (rdy < -0.001) ? camH / (-rdy) : 1e6;
 
-        neonSrc += vBg;   // colors baked per surface
+        // Left buildings: matrix-green windows
+        if (wzL < 1e5) {
+            float wz     = wzL;
+            float wy     = rdy * wz;
+            float worldZ = scrl + wz;
+            float bIdx   = floor(worldZ / BLEN);
+            float tX     = fract(bIdx * 0.618 + 0.10);
+            float bLuma  = (texture(iChannel0, vec2(tX, 0.20)).r +
+                            texture(iChannel0, vec2(tX, 0.45)).r +
+                            texture(iChannel0, vec2(tX, 0.70)).r) * 0.333;
+            float bH     = 0.04 + bLuma * 0.40;
+            float wyTop  = bH - camH;
+            if (wzL < wzG && wy <= wyTop) {
+                float fade  = exp(-wz * 0.07);
+                float faceZ = fract(worldZ / BLEN);
+                float faceY = (wy + camH) / bH;
+                float wgZ   = abs(fract(faceZ * 6.0) - 0.5) * 2.0;
+                float wgY   = abs(fract(faceY * 9.0) - 0.5) * 2.0;
+                float win   = step(0.42, wgZ) * step(0.38, wgY);
+                float winLum = texture(iChannel0, vec2(tX, 0.1 + faceY * 0.8)).r;
+                vec3 winCol  = mix(vec3(0.12, 0.95, 0.50), vec3(0.52, 0.10, 1.00),
+                                   fract(bIdx * 0.41)) * winLum;
+                city += mix(vec3(0.02, 0.035, 0.07), winCol * 0.9, win) * fade;
+                city += exp(-abs(wy - wyTop) * wz * 16.0) * 0.4 * vec3(0.70, 1.00, 0.85) * fade;
+            }
+        }
+
+        // Right buildings: ICE-blue / teal windows
+        if (wzR < 1e5) {
+            float wz     = wzR;
+            float wy     = rdy * wz;
+            float worldZ = scrl + wz;
+            float bIdx   = floor(worldZ / BLEN);
+            float tX     = fract(bIdx * 0.618 + 0.60);
+            float bLuma  = (texture(iChannel0, vec2(tX, 0.20)).r +
+                            texture(iChannel0, vec2(tX, 0.45)).r +
+                            texture(iChannel0, vec2(tX, 0.70)).r) * 0.333;
+            float bH     = 0.04 + bLuma * 0.40;
+            float wyTop  = bH - camH;
+            if (wzR < wzG && wy <= wyTop) {
+                float fade  = exp(-wz * 0.07);
+                float faceZ = fract(worldZ / BLEN);
+                float faceY = (wy + camH) / bH;
+                float wgZ   = abs(fract(faceZ * 6.0) - 0.5) * 2.0;
+                float wgY   = abs(fract(faceY * 9.0) - 0.5) * 2.0;
+                float win   = step(0.42, wgZ) * step(0.38, wgY);
+                float winLum = texture(iChannel0, vec2(tX, 0.1 + faceY * 0.8)).r;
+                vec3 winCol  = mix(vec3(0.10, 0.58, 1.00), vec3(0.20, 1.00, 0.65),
+                                   fract(bIdx * 0.53)) * winLum;
+                city += mix(vec3(0.02, 0.035, 0.07), winCol * 0.9, win) * fade;
+                city += exp(-abs(wy - wyTop) * wz * 16.0) * 0.4 * vec3(0.70, 1.00, 0.85) * fade;
+            }
+        }
+
+        // Ground: city block grid
+        if (wzG < wzL && wzG < wzR && rdy < -0.001) {
+            float wz   = wzG;
+            float wx   = rdx * wz;
+            float fade = exp(-wz * 0.045) * smoothstep(0.0, 0.025, -rdy);
+            float gx   = abs(fract(wx             * 2.2) - 0.5) * 2.0;
+            float gz   = abs(fract((scrl + wz) * 2.2 / BLEN) - 0.5) * 2.0;
+            float grid = max(1.0 - smoothstep(0.0, 0.07, gx),
+                             1.0 - smoothstep(0.0, 0.07, gz));
+            city += grid * fade * 0.10 * vec3(0.12, 0.95, 0.50);
+        }
+
+        // Horizon haze
+        city += vec3(0.015, 0.025, 0.08) * exp(-abs(rdy) * 18.0) * 0.35;
+
+        neonSrc += city;
     }
 
     // ── Direct transmitted light ──────────────────────────────────────────────

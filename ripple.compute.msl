@@ -62,7 +62,8 @@ kernel void computeMain(
     float u     = st.r;
     float u_old = st.g;
     float prevLuma = st.b;
-    float t     = st.a + 0.016f;    // frame time accumulator
+    float t         = st.a + 0.016f;  // frame time accumulator (drives convection, ambient drops)
+    float scrollAcc = st.a;          // also serves as the scroll boost accumulator
 
     // ── Convection current field ──────────────────────────────────────────────
     // Two-scale: slow large circulation + faster eddies + persistent undertow
@@ -117,5 +118,10 @@ kernel void computeMain(
     float by = smoothstep(0.0f, 0.04f, uv.y) * smoothstep(1.0f, 0.96f, uv.y);
     u_new = clamp(u_new * bx * by, -1.2f, 1.2f);
 
-    state_write.write(float4(u_new, u, termLuma, t), gid);
+    // Accumulate only the typing boost — always positive, never decreases, no backward scroll
+    float vel2      = u_new - u;
+    float energy2   = sqrt(u_new * u_new + vel2 * vel2);
+    float wActivity = smoothstep(0.0f, 0.12f, energy2);
+    scrollAcc      += wActivity * 0.40f * 0.016f;
+    state_write.write(float4(u_new, u, termLuma, scrollAcc), gid);
 }

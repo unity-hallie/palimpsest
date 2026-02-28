@@ -15,9 +15,9 @@
 using namespace metal;
 
 // ── Tuning ────────────────────────────────────────────────────────────────────
-#define WAVE_SPEED   0.14f    // c²  — slightly slower → narrower, tighter ripples
-#define BASE_DAMP    0.030f   // γ   — base viscous damping
-#define NON_NEWT     0.55f    // shear-thinning: high energy → much lower damping
+#define WAVE_SPEED   0.08f    // c²  — slow, wide, glassy ripples
+#define BASE_DAMP    0.055f   // γ   — high damping → ripples die quickly
+#define NON_NEWT     0.35f    // shear-thinning: gentler at high energy
 #define PLASTICITY   0.18f    // peak retention: settled regions resist restoring force
 #define CURRENT_STR  0.000f   // convection field magnitude
 #define UNDERTOW     float2(0.0000f, 0.0000f)   // persistent directional drift
@@ -101,7 +101,7 @@ kernel void computeMain(
     float3 termNow  = terminal.sample(smp, uv).rgb;
     float  termLuma = dot(termNow, float3(0.299f, 0.587f, 0.114f));
     float  change   = abs(termLuma - prevLuma);
-    u_new += smoothstep(0.04f, 0.20f, change) * 0.12f;
+    u_new += smoothstep(0.06f, 0.25f, change) * 0.06f;
 
     // ── Ambient drops (~1 per second, hash-seeded) ────────────────────────────
     float tSlot   = floor(t * 60.0f);
@@ -110,7 +110,7 @@ kernel void computeMain(
         float2 center = float2(hash21(float2(tSlot * 1.3f, 7.1f)),
                                hash21(float2(tSlot * 2.1f, 3.7f)));
         float  da = length(uv - center);
-        u_new += exp(-da*da * (1.0f / (2.0f * 0.012f * 0.012f))) * 0.06f;
+        u_new += exp(-da*da * (1.0f / (2.0f * 0.012f * 0.012f))) * 0.03f;
     }
 
     // ── Absorbing boundary ────────────────────────────────────────────────────

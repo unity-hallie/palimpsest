@@ -52,8 +52,8 @@ body { background: #06081a; width: 100vw; height: 100vh; overflow: hidden; }
   <label>extinction <input type="range" id="sExt"     min="0.2"  max="4.0"  step="0.1"  value="1.6"> <span id="vExt">1.6</span></label>
   <label>scatter    <input type="range" id="sScatter" min="0"    max="2.0"  step="0.05" value="0.5"> <span id="vScatter">0.50</span></label>
   <label>bloom      <input type="range" id="sBloom"   min="0"    max="1.0"  step="0.05" value="0.40"><span id="vBloom">0.40</span></label>
-  <label>speed      <input type="range" id="sSpeed"   min="0.05" max="0.45" step="0.01" value="0.18"><span id="vSpeed">0.18</span></label>
-  <label>damping    <input type="range" id="sDamp"    min="0"    max="0.12" step="0.005" value="0.035"><span id="vDamp">0.035</span></label>
+  <label>speed      <input type="range" id="sSpeed"   min="0.05" max="0.45" step="0.01" value="0.10"><span id="vSpeed">0.10</span></label>
+  <label>damping    <input type="range" id="sDamp"    min="0"    max="0.12" step="0.005" value="0.060"><span id="vDamp">0.060</span></label>
   <label>amplitude  <input type="range" id="sAmp"     min="0.2"  max="4.0"  step="0.1"  value="1.0"> <span id="vAmp">1.0</span></label>
 </div>
 <script>
@@ -351,93 +351,35 @@ void main() {
     vec3 neonTint = vec3(0.28, 0.92, 0.80);
     vec3 neonSrc  = term * neonTint * 1.18;
 
-    // ── Hackers cityscape — camera flies over terminal-driven skyline ─────────
-    // Building heights = terminal column luminance. Dense code = tall towers.
-    // Left buildings: matrix-green windows. Right: ICE-blue/teal. Rooflines glow.
+    // ── Hyperspace starfield — slow zoom outward from center ─────────────────
     {
-        float vpX  = 0.50, vpY = 0.44;
-        float camH = 0.30;   // camera height above ground
-        float stW  = 0.28;   // half street width
-        float BLEN = 0.50;   // building block depth
-        float scrl = iScroll;
-        float rdx  = uv.x - vpX;
-        float rdy  = uv.y - vpY;
-        vec3  city = vec3(0.0);
+        vec2 center = vec2(0.50, 0.50);
+        vec2 d      = uv - center;
+        vec3 stars  = vec3(0.0);
 
-        float wzL = (rdx < -0.001) ? stW / (-rdx) : 1e6;
-        float wzR = (rdx >  0.001) ? stW /   rdx  : 1e6;
-        float wzG = (rdy < -0.001) ? camH / (-rdy) : 1e6;
-
-        // Left buildings: matrix-green / violet windows
-        if (wzL < 1e5) {
-            float wz     = wzL;
-            float wy     = rdy * wz;
-            float worldZ = scrl + wz;
-            float bIdx   = floor(worldZ / BLEN);
-            float tX     = fract(bIdx * 0.618 + 0.10);
-            float bLuma  = (texture(iChannel0, vec2(tX, 0.20)).r +
-                            texture(iChannel0, vec2(tX, 0.45)).r +
-                            texture(iChannel0, vec2(tX, 0.70)).r) * 0.333;
-            float bH     = 0.04 + bLuma * 0.40;
-            float wyTop  = bH - camH;
-            if (wzL < wzG && wy <= wyTop) {
-                float fade  = exp(-wz * 0.07);
-                float faceZ = fract(worldZ / BLEN);
-                float faceY = (wy + camH) / bH;
-                float wgZ   = abs(fract(faceZ * 6.0) - 0.5) * 2.0;
-                float wgY   = abs(fract(faceY * 9.0) - 0.5) * 2.0;
-                float win   = step(0.42, wgZ) * step(0.38, wgY);
-                float winLum = texture(iChannel0, vec2(tX, 0.1 + faceY * 0.8)).r;
-                vec3 winCol  = mix(vec3(0.12, 0.95, 0.50), vec3(0.52, 0.10, 1.00),
-                                   fract(bIdx * 0.41)) * winLum;
-                city += mix(vec3(0.02, 0.035, 0.07), winCol * 0.9, win) * fade;
-                city += exp(-abs(wy - wyTop) * wz * 16.0) * 0.4 * vec3(0.70, 1.00, 0.85) * fade;
+        for (int i = 0; i < 5; i++) {
+            float fi   = float(i);
+            float seed = fi * 1.618;
+            // z = lifecycle [0→1]: star born at center, drifts to edge, wraps
+            float z    = fract(iTick * 0.018 * (1.0 + fi * 0.22) + seed);
+            // Project pixel back to star-space (inverse of zoom transform)
+            vec2  sv   = d / max(z, 0.01) * 0.5 + center;
+            vec2  cell = floor(sv * 14.0);
+            vec2  frac = fract(sv * 14.0);
+            float h    = hash21(cell + seed * 19.3);
+            if (h > 0.68) {
+                vec2  ctr  = vec2(fract(h * 11.37), fract(h * 8.53));
+                float dist = length(frac - ctr);
+                float glow = exp(-dist * dist * 3000.0);
+                float fade = smoothstep(0.0, 0.06, length(d))   // hide center singularity
+                           * smoothstep(0.65, 0.40, length(d))  // fade at screen edge
+                           * smoothstep(0.0,  0.12, z);         // fade in from center
+                vec3  col  = mix(vec3(0.50, 0.72, 1.00), vec3(0.95, 0.98, 1.00), h * h);
+                stars += glow * fade * h * col * 0.55;
             }
         }
 
-        // Right buildings: ICE-blue / teal windows
-        if (wzR < 1e5) {
-            float wz     = wzR;
-            float wy     = rdy * wz;
-            float worldZ = scrl + wz;
-            float bIdx   = floor(worldZ / BLEN);
-            float tX     = fract(bIdx * 0.618 + 0.60);
-            float bLuma  = (texture(iChannel0, vec2(tX, 0.20)).r +
-                            texture(iChannel0, vec2(tX, 0.45)).r +
-                            texture(iChannel0, vec2(tX, 0.70)).r) * 0.333;
-            float bH     = 0.04 + bLuma * 0.40;
-            float wyTop  = bH - camH;
-            if (wzR < wzG && wy <= wyTop) {
-                float fade  = exp(-wz * 0.07);
-                float faceZ = fract(worldZ / BLEN);
-                float faceY = (wy + camH) / bH;
-                float wgZ   = abs(fract(faceZ * 6.0) - 0.5) * 2.0;
-                float wgY   = abs(fract(faceY * 9.0) - 0.5) * 2.0;
-                float win   = step(0.42, wgZ) * step(0.38, wgY);
-                float winLum = texture(iChannel0, vec2(tX, 0.1 + faceY * 0.8)).r;
-                vec3 winCol  = mix(vec3(0.10, 0.58, 1.00), vec3(0.20, 1.00, 0.65),
-                                   fract(bIdx * 0.53)) * winLum;
-                city += mix(vec3(0.02, 0.035, 0.07), winCol * 0.9, win) * fade;
-                city += exp(-abs(wy - wyTop) * wz * 16.0) * 0.4 * vec3(0.70, 1.00, 0.85) * fade;
-            }
-        }
-
-        // Ground: city block grid
-        if (wzG < wzL && wzG < wzR && rdy < -0.001) {
-            float wz   = wzG;
-            float wx   = rdx * wz;
-            float fade = exp(-wz * 0.045) * smoothstep(0.0, 0.025, -rdy);
-            float gx   = abs(fract(wx             * 2.2) - 0.5) * 2.0;
-            float gz   = abs(fract((scrl + wz) * 2.2 / BLEN) - 0.5) * 2.0;
-            float grid = max(1.0 - smoothstep(0.0, 0.07, gx),
-                             1.0 - smoothstep(0.0, 0.07, gz));
-            city += grid * fade * 0.10 * vec3(0.12, 0.95, 0.50);
-        }
-
-        // Horizon haze
-        city += vec3(0.015, 0.025, 0.08) * exp(-abs(rdy) * 18.0) * 0.35;
-
-        neonSrc += city;
+        neonSrc += stars * 0.28;
     }
 
     // ── Direct transmitted light ──────────────────────────────────────────────

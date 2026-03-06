@@ -5,8 +5,8 @@
 
 // ── Tuning ────────────────────────────────────────────────────────────────────
 #define NEON_STRENGTH   1.25
-#define HEAT_GLOW       2.5
-#define SMOKE_NEON      1.5
+#define HEAT_GLOW       1.2
+#define SMOKE_NEON      0.8
 #define SMOKE_OPACITY   0.40
 #define VIGNETTE        0.15
 // ─────────────────────────────────────────────────────────────────────────────
@@ -52,18 +52,18 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // ── Smoke: neon + text scatter + energy heat ──────────────────────────
     vec3 smokeColor = neonColor * density * SMOKE_NEON;
     // Text light scattered into smoke
-    smokeColor += term * density * textBright * 0.4;
+    smokeColor += term * density * textBright * 0.2;
     // Energy heat glow — ember to warm white, smooth and stable
     float h = smoothstep(0.0, 0.6, energy);
     vec3 heatTint = mix(vec3(0.6, 0.2, 0.05), vec3(1.0, 0.75, 0.45), h);
     smokeColor += heatTint * density * energy * HEAT_GLOW;
 
-    // ── Composite ─────────────────────────────────────────────────────────
+    // ── Edge neon wash (base layer, under smoke) ────────────────────────
+    color += neonColor * NEON_STRENGTH * 0.10;
+
+    // ── Composite smoke over everything ───────────────────────────────────
     float fog = smoothstep(0.0, 0.4, density) * SMOKE_OPACITY;
     color = mix(color, smokeColor, fog);
-
-    // Edge neon ambient wash
-    color += neonColor * NEON_STRENGTH * 0.22;
 
     // ── Vignette ──────────────────────────────────────────────────────────
     color *= 1.0 - VIGNETTE * dot(uv - 0.5, uv - 0.5);

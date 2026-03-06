@@ -64,9 +64,14 @@ kernel void computeMain(
     float t = (state_read.sample(smp, float2(0.25f, 0.25f)).r
              + state_read.sample(smp, float2(0.75f, 0.75f)).r) * 50.0f;
 
-    // ── Text luminance ────────────────────────────────────────────────────
+    // ── Text luminance (spatially smoothed — no sharp spikes) ──────────
     float3 termNow = terminal.sample(smp, uv).rgb;
-    float  luma    = dot(termNow, float3(0.299f, 0.587f, 0.114f));
+    float  lumaC   = dot(termNow, float3(0.299f, 0.587f, 0.114f));
+    float  lumaL   = dot(terminal.sample(smp, uv + float2(-px.x * 4.0f, 0)).rgb, float3(0.299f, 0.587f, 0.114f));
+    float  lumaR   = dot(terminal.sample(smp, uv + float2( px.x * 4.0f, 0)).rgb, float3(0.299f, 0.587f, 0.114f));
+    float  lumaU   = dot(terminal.sample(smp, uv + float2(0, -px.y * 4.0f)).rgb, float3(0.299f, 0.587f, 0.114f));
+    float  lumaD   = dot(terminal.sample(smp, uv + float2(0,  px.y * 4.0f)).rgb, float3(0.299f, 0.587f, 0.114f));
+    float  luma    = (lumaC * 0.4f + (lumaL + lumaR + lumaU + lumaD) * 0.15f);
 
     // ── Velocity diffusion ────────────────────────────────────────────────
     float2 vL = state_read.sample(smp, uv + float2(-px.x, 0)).gb;
@@ -75,18 +80,27 @@ kernel void computeMain(
     float2 vD = state_read.sample(smp, uv + float2(0,  px.y)).gb;
     vel = mix(vel, (vL + vR + vU + vD) * 0.25f, VEL_DIFFUSE);
 
-    // ── Brownian motion from text ─────────────────────────────────────────
-    float agitation = luma * 2.5f;
-    vel += curlNoise(uv * 120.0f, t * 3.0f) * agitation * 0.014f;
-    vel += curlNoise(uv * 50.0f,  t * 1.5f) * agitation * 0.022f;
-    vel += curlNoise(uv * 20.0f,  t * 0.5f) * agitation * 0.010f;
+    // ── Brownian motion from text (ramped by energy — no instant spikes) ──
+    // Agitation scales with energy: cold smoke barely responds, hot smoke amplifies
+    float agitation = luma * (1.0f + energy * 6.0f);
+    vel += curlNoise(uv * 120.0f, t * 3.0f) * agitation * 0.018f;
+    vel += curlNoise(uv * 50.0f,  t * 1.5f) * agitation * 0.028f;
+    vel += curlNoise(uv * 20.0f,  t * 0.5f) * agitation * 0.012f;
+
+    // ── Energy pushes smoke outward (hot expands into cold) ────────────────
+    float enL = state_read.sample(smp, uv + float2(-px.x, 0)).a;
+    float enR = state_read.sample(smp, uv + float2( px.x, 0)).a;
+    float enU = state_read.sample(smp, uv + float2(0, -px.y)).a;
+    float enD = state_read.sample(smp, uv + float2(0,  px.y)).a;
+    float2 energyGrad = float2(enR - enL, enD - enU);
+    vel += energyGrad * 0.3f;  // hot pushes toward cold
 
     // ── Buoyancy ──────────────────────────────────────────────────────────
     vel.y -= density * BUOYANCY;
 
     // ── Ambient turbulence ────────────────────────────────────────────────
-    vel += curlNoise(uv * 60.0f, t * 2.0f) * 0.0004f;
-    vel += curlNoise(uv * 15.0f, t * 0.5f) * 0.0006f;
+    vel += curlNoise(uv * 60.0f, t * 2.0f) * 0.0002f;
+    vel += curlNoise(uv * 15.0f, t * 0.5f) * 0.0003f;
 
     // ── Velocity decay ────────────────────────────────────────────────────
     vel *= VEL_DECAY;
@@ -98,9 +112,8 @@ kernel void computeMain(
     // ── Dissipation ───────────────────────────────────────────────────────
     newDensity *= DISSIPATION;
 
-    // ── Smoke injection ───────────────────────────────────────────────────
-    float injectNoise = vnoise(uv * 8.0f + float2(t * 0.012f, t * 0.009f));
-    newDensity += SMOKE_INJECT * smoothstep(0.4f, 0.7f, injectNoise);
+    // ── Smoke injection: uniform across surface ─────────────────────────
+    newDensity += SMOKE_INJECT;
     newDensity = clamp(newDensity, 0.0f, 1.0f);
 
     // ── Smoothed energy: temporal EMA + spatial diffusion ─────────────────
@@ -118,10 +131,8 @@ kernel void computeMain(
     energy = mix(energy, rawEnergy, 0.05f);      // temporal smooth (very slow)
     energy = clamp(energy, 0.0f, 1.0f);
 
-    // ── Boundary ──────────────────────────────────────────────────────────
-    float bx = smoothstep(0.0f, 0.03f, uv.x) * smoothstep(1.0f, 0.97f, uv.x);
-    float by = smoothstep(0.0f, 0.03f, uv.y) * smoothstep(1.0f, 0.97f, uv.y);
-    vel *= bx * by;
+    // ── Open boundary: smoke flows out freely ──────────────────────────────
+    // No velocity damping at edges — smoke just leaves
 
     state_write.write(float4(newDensity, vel.x, vel.y, energy), gid);
 }

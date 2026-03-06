@@ -14,8 +14,8 @@
 #include <metal_stdlib>
 using namespace metal;
 
-#define DISSIPATION    0.953f
-#define VEL_DECAY      0.85f
+#define DISSIPATION    0.993f
+#define VEL_DECAY      0.95f
 #define VEL_DIFFUSE    0.65f
 #define BUOYANCY       0.005f
 #define SMOKE_INJECT   0.005f

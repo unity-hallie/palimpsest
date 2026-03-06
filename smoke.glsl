@@ -7,7 +7,7 @@
 #define NEON_STRENGTH   1.25
 #define HEAT_GLOW       1.9
 #define SMOKE_NEON      0.8
-#define SMOKE_OPACITY   0.40
+#define SMOKE_OPACITY   0.25
 #define VIGNETTE        0.00
 // ─────────────────────────────────────────────────────────────────────────────
 

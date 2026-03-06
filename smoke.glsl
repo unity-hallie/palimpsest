@@ -5,10 +5,10 @@
 
 // ── Tuning ────────────────────────────────────────────────────────────────────
 #define NEON_STRENGTH   1.25
-#define HEAT_GLOW       1.2
+#define HEAT_GLOW       1.9
 #define SMOKE_NEON      0.8
 #define SMOKE_OPACITY   0.40
-#define VIGNETTE        0.15
+#define VIGNETTE        0.00
 // ─────────────────────────────────────────────────────────────────────────────
 
 float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
@@ -64,6 +64,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // ── Composite smoke over everything ───────────────────────────────────
     float fog = smoothstep(0.0, 0.4, density) * SMOKE_OPACITY;
     color = mix(color, smokeColor, fog);
+
+    // ── Focus dim ─────────────────────────────────────────────────────────
+    float focusT = clamp((iTime - iTimeFocus) * 1.5, 0.0, 1.0);
+    float focusMix = iFocus == 1 ? focusT : 1.0 - focusT;
+    float dimAmount = mix(0.55, 1.0, focusMix);
+    float satAmount = mix(0.3, 1.0, focusMix);
+    vec3 grey = vec3(luma(color));
+    color = mix(grey, color, satAmount) * dimAmount;
 
     // ── Vignette ──────────────────────────────────────────────────────────
     color *= 1.0 - VIGNETTE * dot(uv - 0.5, uv - 0.5);

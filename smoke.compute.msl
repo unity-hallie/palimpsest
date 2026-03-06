@@ -113,6 +113,10 @@ kernel void computeMain(
     // ── Coriolis ─────────────────────────────────────────────────────────
     vel += float2(-vel.y, vel.x) * 0.12f;
 
+    // ── Breeze: slow-shifting external wind ────────────────────────────────
+    float2 wind = float2(sin(t * 0.07f), cos(t * 0.05f)) * 0.002f;
+    vel += wind;
+
     // ── Buoyancy ──────────────────────────────────────────────────────────
     vel.y -= density * BUOYANCY;
 

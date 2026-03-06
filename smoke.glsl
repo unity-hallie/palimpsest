@@ -4,8 +4,10 @@
 // iChannel2 = smoke state (R=density, G=velX, B=velY, A=smoothed energy)
 
 // ── Tuning ────────────────────────────────────────────────────────────────────
-#define NEON_STRENGTH   1.25
+#define NEON_STRENGTH   0.6
 #define HEAT_GLOW       1.9
+#define HEAT_COLOR_LO   vec3(0.6, 0.2, 0.05)
+#define HEAT_COLOR_HI   vec3(1.0, 0.75, 0.45)
 #define SMOKE_NEON      0.8
 #define SMOKE_OPACITY   0.25
 #define VIGNETTE        0.00
@@ -55,7 +57,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     smokeColor += term * density * textBright * 0.2;
     // Energy heat glow — ember to warm white, smooth and stable
     float h = smoothstep(0.0, 0.6, energy);
-    vec3 heatTint = mix(vec3(0.6, 0.2, 0.05), vec3(1.0, 0.75, 0.45), h);
+    vec3 heatTint = mix(HEAT_COLOR_LO, HEAT_COLOR_HI, h);
     smokeColor += heatTint * density * energy * HEAT_GLOW;
 
     // ── Edge neon wash (base layer, under smoke) ────────────────────────

@@ -4,6 +4,8 @@ You spend hours a day staring at a terminal. Might as well nest.
 
 Palimpsest is a collection of shaders for [Ghostty](https://ghostty.org) that turn your terminal into a place you want to be. Not a distraction — a room. Some of these are loud and some are quiet, but they all share the conviction that the text you're reading is sacred and everything else is atmosphere.
 
+> **Heads up:** Most of these shaders require a [custom fork of Ghostty](https://github.com/unity-hallie/ghostty/tree/feature/feedback-buffer) that adds feedback buffers and Metal compute shader support. This isn't merged upstream — you'll need to build from source. A few simpler shaders (`astrolabe.glsl`, `kalpa.glsl`, `terraform.glsl`) work on stock Ghostty.
+
 Several shaders run GPU-accelerated fluid and particle simulations via Metal compute kernels. Your terminal becomes a physics sandbox where the text itself is the heat source, the impulse, the thing that makes the smoke move and the waves ripple.
 
 ## The shaders

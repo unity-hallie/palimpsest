@@ -67,12 +67,12 @@ kernel void computeMain(
     float2 vel    = float2(st.g, st.b);
     float energy  = st.a;
 
-    // ── Time: accumulate in corner pixel for smooth drift ─────────────────
-    float prevTime = state_read.sample(smp, float2(0.5f / float(W), 0.5f / float(H))).g;
-    float t = prevTime + 0.016f;  // ~60fps tick
+    // ── Time: accumulate in corner pixel, wrap for half-float precision ───
+    float2 cornerUV = float2(0.5f / float(W), 0.5f / float(H));
+    float prevTime = state_read.sample(smp, cornerUV).g;
+    float t = fmod(prevTime + 0.016f, 10.0f);  // wrap at 10 — safe for float16
     if (gid.x == 0u && gid.y == 0u) {
-        // Store time in pixel (0,0) green channel — won't be visible
-        float4 corner = state_read.sample(smp, float2(0.5f / float(W), 0.5f / float(H)));
+        float4 corner = state_read.sample(smp, cornerUV);
         state_write.write(float4(corner.r, t, corner.b, corner.a), gid);
         return;
     }
@@ -116,6 +116,22 @@ kernel void computeMain(
     // ── Breeze: slow-shifting external wind ────────────────────────────────
     float2 wind = float2(sin(t * 0.07f), cos(t * 0.05f)) * 0.002f;
     vel += wind;
+
+    // ── Drifting thermals ─────────────────────────────────────────────────
+    for (int i = 0; i < 5; i++) {
+        float fi = float(i);
+        float2 pos = float2(
+            fract(fi * 0.21f + t * 0.03f * (1.0f + fi * 0.15f)),
+            fract(fi * 0.37f + t * 0.04f * (1.0f + fi * 0.1f))
+        );
+        float pulse = 0.5f + 0.5f * sin(t * 0.8f + fi * 2.1f);
+        float dist = length(uv - pos);
+        if (dist < 0.15f) {
+            float f = (1.0f - dist / 0.15f); f *= f;
+            vel.y -= f * pulse * 0.03f;  // updraft
+            vel += curlNoise(uv * 40.0f, t + fi * 5.0f) * f * pulse * 0.01f;
+        }
+    }
 
     // ── Buoyancy ──────────────────────────────────────────────────────────
     vel.y -= density * BUOYANCY;

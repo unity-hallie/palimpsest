@@ -83,10 +83,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     color += neonColor * NEON_STRENGTH * 0.15;
 
     // ── Smoke catches text light ────────────────────────────────────────────
-    // Use overall screen text density as a proxy — no spatial sampling needed
-    // The feedback buffer center pixel is a good average of the whole screen
     float screenBright = luma(texture(iChannel1, vec2(0.5)).rgb);
     color += vec3(0.55, 0.75, 0.70) * density * screenBright * 4.0;
+
+    // ── Heat from compute shader: real diffused thermal field ──────────
+    float heat = texture(iChannel2, uv).a;
+    heat = smoothstep(0.0, 0.5, heat);
+    vec3 heatColor = mix(vec3(0.8, 0.25, 0.05),   // deep ember
+                         vec3(1.0, 0.85, 0.6),     // hot white-amber
+                         heat);
+    color += heatColor * heat * density * 1.8;
 
     // ── Vignette ────────────────────────────────────────────────────────────
     color *= 1.0 - VIGNETTE * dot(uv - 0.5, uv - 0.5);

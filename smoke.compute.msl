@@ -4,7 +4,7 @@
 //   R = smoke density    [0,1]
 //   G = velocity X       [-1,1]
 //   B = velocity Y       [-1,1]
-//   A = prev terminal luma (for change detection)
+//   A = heat field [0,1] (diffuses, conducts from text + typing)
 //
 // Physics:
 //   - Incompressible-ish 2D fluid via Jacobi pressure solve
@@ -70,17 +70,19 @@ kernel void computeMain(
     float4 st = state_read.sample(smp, uv);
     float density  = st.r;
     float2 vel     = float2(st.g, st.b);
-    float prevLuma = st.a;
+    float heat     = st.a;
 
     // ── Time: derive from density field average (slow, stable) ─────────────
     // Sample a few fixed points — their density changes slowly, giving stable drift
     float t = (state_read.sample(smp, float2(0.25f, 0.25f)).r
              + state_read.sample(smp, float2(0.75f, 0.75f)).r) * 50.0f;
 
-    // ── Terminal change detection ───────────────────────────────────────────
+    // ── Terminal change detection (compare against feedback, not stored) ────
     float3 termNow  = terminal.sample(smp, uv).rgb;
     float  termLuma = dot(termNow, float3(0.299f, 0.587f, 0.114f));
-    float  change   = abs(termLuma - prevLuma);
+    float3 prevFrame = feedback.sample(smp, uv).rgb;
+    float  prevLuma  = dot(prevFrame, float3(0.299f, 0.587f, 0.114f));
+    float  change    = abs(termLuma - prevLuma);
     change = smoothstep(0.04f, 0.2f, change);
 
     // ── Velocity diffusion (average with neighbors) ─────────────────────────
@@ -91,35 +93,21 @@ kernel void computeMain(
     float2 vAvg = (vL + vR + vU + vD) * 0.25f;
     vel = mix(vel, vAvg, VEL_DIFFUSE);
 
-    // ── Typing impulse: push smoke radially outward from activity ───────────
-    // Scan a small neighborhood for change and compute a push direction
-    float2 pushDir = float2(0.0f);
-    float pushStr = 0.0f;
-    for (int dy = -2; dy <= 2; dy++) {
-        for (int dx = -2; dx <= 2; dx++) {
-            if (dx == 0 && dy == 0) continue;
-            float2 nUV = uv + float2(float(dx), float(dy)) * px * 8.0f;
-            float nPrev = state_read.sample(smp, nUV).a;
-            float3 nTerm = terminal.sample(smp, nUV).rgb;
-            float nLuma = dot(nTerm, float3(0.299f, 0.587f, 0.114f));
-            float nChange = smoothstep(0.04f, 0.2f, abs(nLuma - nPrev));
-            // Push away from the change source
-            float2 away = normalize(float2(float(-dx), float(-dy)) + 0.001f);
-            pushDir += away * nChange;
-            pushStr += nChange;
-        }
-    }
-    if (pushStr > 0.01f) {
-        pushDir /= pushStr;
-        vel += pushDir * pushStr * IMPULSE_STR * 0.2f;
-    }
-    // Direct impulse at this pixel — direction from position hash (stable)
-    vel += float2(hash21(uv * 100.0f) - 0.5f,
-                  hash21(uv * 100.0f + 7.1f) - 0.5f) * change * IMPULSE_STR;
+    // ── Typing impulse: radial push with smooth falloff ─────────────────────
+    // Just use local change + curl noise for direction — no grid scan
+    float2 impulseDir = curlNoise(uv * 6.0f, t * 0.3f) + float2(
+        hash21(uv * 100.0f) - 0.5f,
+        hash21(uv * 100.0f + 7.1f) - 0.5f);
+    vel += normalize(impulseDir + 0.001f) * change * IMPULSE_STR;
 
-    // ── Buoyancy: smoke rises ───────────────────────────────────────────────
+    // ── Buoyancy: hot smoke rises faster ─────────────────────────────────────
     // Y increases downward in Ghostty, so "up" is negative Y
-    vel.y -= density * BUOYANCY;
+    float heat = length(vel) * 8.0f;
+    vel.y -= density * BUOYANCY * (1.0f + heat * 3.0f);
+
+    // ── Text radiance: letters emit gentle heat (brownian turbulence) ───────
+    float radiance = termLuma * 0.6f;
+    vel += curlNoise(uv * 8.0f, t * 0.5f) * radiance * 0.0006f;
 
     // ── Ambient turbulence: curl noise keeps smoke alive ────────────────────
     vel += curlNoise(uv * 4.0f, t) * TURBULENCE;
@@ -150,7 +138,7 @@ kernel void computeMain(
     float dU = state_read.sample(smp, uv + float2(0, -px.y)).r;
     float dD = state_read.sample(smp, uv + float2(0,  px.y)).r;
     float div = ((vR.x - vL.x) + (vD.y - vU.y)) * 0.5f;
-    vel -= float2(dR - dL, dD - dU) * 0.1f;  // pressure gradient correction
+    vel -= float2(dR - dL, dD - dU) * 0.04f;  // pressure gradient (gentle to avoid oscillation)
 
     // ── Boundary ────────────────────────────────────────────────────────────
     float bx = smoothstep(0.0f, 0.03f, uv.x) * smoothstep(1.0f, 0.97f, uv.x);
@@ -158,5 +146,17 @@ kernel void computeMain(
     float boundary = bx * by;
     vel *= boundary;
 
-    state_write.write(float4(newDensity, vel.x, vel.y, termLuma), gid);
+    // ── Heat: diffuse + inject from typing and text radiance ────────────────
+    float hL = state_read.sample(smp, uv + float2(-px.x, 0)).a;
+    float hR = state_read.sample(smp, uv + float2( px.x, 0)).a;
+    float hU = state_read.sample(smp, uv + float2(0, -px.y)).a;
+    float hD = state_read.sample(smp, uv + float2(0,  px.y)).a;
+    float hAvg = (hL + hR + hU + hD) * 0.25f;
+    heat = mix(heat, hAvg, 0.15f);           // diffuse toward neighbors
+    heat *= 0.985f;                           // slow radiative cooling
+    heat += change * 0.4f;                    // typing injects heat
+    heat += termLuma * 0.001f;                // text radiates gently
+    heat = clamp(heat, 0.0f, 1.0f);
+
+    state_write.write(float4(newDensity, vel.x, vel.y, heat), gid);
 }

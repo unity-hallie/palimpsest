@@ -2,13 +2,14 @@
 //
 // State texture (rgba16f):
 //   R = smoke density       [0,1]
-//   G = velocity X          [-1,1]
+//   G = velocity X          [-1,1]  (pixel 0,0: accumulated time)
 //   B = velocity Y          [-1,1]
 //   A = smoothed energy     [0,1]  — temporal EMA of |vel|, flicker-free
 //
 // Physics: text luminance drives brownian curl noise agitation.
-// Energy accumulates slowly (5% new per frame), diffuses spatially,
-// advects with smoke. Energy gradient pushes smoke outward.
+// Energy accumulates slowly, diffuses spatially, advects with smoke.
+// Coriolis deflection spirals expanding smoke. Lissajous breeze shifts
+// wind direction. Drifting thermals create invisible convection cells.
 // High viscosity (0.65) for silky coherent flow.
 
 #include <metal_stdlib>

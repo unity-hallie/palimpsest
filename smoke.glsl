@@ -1,7 +1,9 @@
-// smoke.glsl — volumetric smoke with smoothed energy glow + bisexual edge lighting
+// smoke.glsl — volumetric smoke with energy glow + bisexual edge lighting
 //
 // iChannel0 = terminal content
 // iChannel2 = smoke state (R=density, G=velX, B=velY, A=smoothed energy)
+//
+// Tunable heat colors, focus dim/desaturate on unfocused windows.
 
 // ── Tuning ────────────────────────────────────────────────────────────────────
 #define NEON_STRENGTH   0.6

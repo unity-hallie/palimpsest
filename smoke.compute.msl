@@ -67,11 +67,15 @@ kernel void computeMain(
     float2 vel    = float2(st.g, st.b);
     float energy  = st.a;
 
-    // ── Time: use hash of frame-varying state for stable slow drift ──────
-    // Mix density at offset points — varies slowly, breaks symmetry
-    float t = (state_read.sample(smp, float2(0.17f, 0.31f)).r * 37.0f
-             + state_read.sample(smp, float2(0.83f, 0.67f)).r * 53.0f
-             + state_read.sample(smp, float2(0.5f,  0.5f )).a * 71.0f);
+    // ── Time: accumulate in corner pixel for smooth drift ─────────────────
+    float prevTime = state_read.sample(smp, float2(0.5f / float(W), 0.5f / float(H))).g;
+    float t = prevTime + 0.016f;  // ~60fps tick
+    if (gid.x == 0u && gid.y == 0u) {
+        // Store time in pixel (0,0) green channel — won't be visible
+        float4 corner = state_read.sample(smp, float2(0.5f / float(W), 0.5f / float(H)));
+        state_write.write(float4(corner.r, t, corner.b, corner.a), gid);
+        return;
+    }
 
     // ── Text luminance (spatially smoothed) ──────────────────────────────
     float lumaC = lumaF(terminal.sample(smp, uv).rgb);
@@ -100,7 +104,14 @@ kernel void computeMain(
 
     // ── Energy gradient → expansion force ────────────────────────────────
     float2 energyGrad = float2(nR.a - nL.a, nD.a - nU.a);
-    vel += energyGrad * 0.3f;
+    vel += energyGrad * 0.05f;
+
+    // ── Radial expansion ──────────────────────────────────────────────────
+    float2 toEdge = (uv - 0.5f) * 2.0f;
+    vel += toEdge * density * 0.003f;
+
+    // ── Coriolis ─────────────────────────────────────────────────────────
+    vel += float2(-vel.y, vel.x) * 0.12f;
 
     // ── Buoyancy ──────────────────────────────────────────────────────────
     vel.y -= density * BUOYANCY;

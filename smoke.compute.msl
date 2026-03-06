@@ -1,0 +1,162 @@
+// smoke.compute.msl — 2D smoke fluid: velocity + density advection
+//
+// State texture (rgba16f):
+//   R = smoke density    [0,1]
+//   G = velocity X       [-1,1]
+//   B = velocity Y       [-1,1]
+//   A = prev terminal luma (for change detection)
+//
+// Physics:
+//   - Incompressible-ish 2D fluid via Jacobi pressure solve
+//   - Smoke density advected by velocity field
+//   - Velocity diffuses and decays
+//   - Terminal changes inject velocity (pushes smoke away from typing)
+//   - Buoyancy: smoke drifts upward slowly
+//   - Curl noise injects gentle ambient turbulence
+
+#include <metal_stdlib>
+using namespace metal;
+
+// ── Tuning ────────────────────────────────────────────────────────────────────
+#define DISSIPATION    0.992f   // smoke density decay per frame (faster fade)
+#define VEL_DECAY      0.96f    // velocity damping per frame
+#define VEL_DIFFUSE    0.2f     // velocity diffusion (smoothing)
+#define IMPULSE_STR    0.6f     // how hard typing pushes smoke
+#define IMPULSE_RADIUS 30.0f    // radius of typing disturbance (pixels)
+#define BUOYANCY       0.0012f  // upward drift of smoke (wispy rising)
+#define TURBULENCE     0.0004f  // ambient curl noise injection
+#define SMOKE_INJECT   0.0012f  // passive smoke generation rate (much less)
+// ─────────────────────────────────────────────────────────────────────────────
+
+static float hash21(float2 p) {
+    p = fract(p * float2(127.1f, 311.7f));
+    p += dot(p, p.yx + 19.19f);
+    return fract(p.x * p.y);
+}
+
+static float vnoise(float2 p) {
+    float2 i = floor(p), f = fract(p);
+    f = f * f * (3.0f - 2.0f * f);
+    float a = hash21(i),          b = hash21(i + float2(1, 0)),
+          c = hash21(i + float2(0, 1)), d = hash21(i + float2(1, 1));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+// Curl of a 2D noise field — divergence-free velocity
+static float2 curlNoise(float2 p, float t) {
+    float e = 0.5f;
+    float2 pt = p + float2(t * 0.02f, t * 0.015f);
+    float n  = vnoise(pt * 2.0f);
+    float dx = vnoise(pt * 2.0f + float2(e, 0.0f)) - n;
+    float dy = vnoise(pt * 2.0f + float2(0.0f, e)) - n;
+    return float2(dy, -dx) / e;
+}
+
+kernel void computeMain(
+    texture2d<float, access::sample> terminal    [[ texture(0) ]],
+    texture2d<float, access::sample> feedback    [[ texture(2) ]],
+    texture2d<float, access::sample> state_read  [[ texture(3) ]],
+    texture2d<float, access::write>  state_write [[ texture(8) ]],
+    uint2 gid [[ thread_position_in_grid ]]
+) {
+    uint W = state_write.get_width();
+    uint H = state_write.get_height();
+    if (gid.x >= W || gid.y >= H) return;
+
+    constexpr sampler smp(filter::linear, address::clamp_to_edge);
+    float2 uv = (float2(gid) + 0.5f) / float2(W, H);
+    float2 px = 1.0f / float2(W, H);
+
+    float4 st = state_read.sample(smp, uv);
+    float density  = st.r;
+    float2 vel     = float2(st.g, st.b);
+    float prevLuma = st.a;
+
+    // ── Time: derive from density field average (slow, stable) ─────────────
+    // Sample a few fixed points — their density changes slowly, giving stable drift
+    float t = (state_read.sample(smp, float2(0.25f, 0.25f)).r
+             + state_read.sample(smp, float2(0.75f, 0.75f)).r) * 50.0f;
+
+    // ── Terminal change detection ───────────────────────────────────────────
+    float3 termNow  = terminal.sample(smp, uv).rgb;
+    float  termLuma = dot(termNow, float3(0.299f, 0.587f, 0.114f));
+    float  change   = abs(termLuma - prevLuma);
+    change = smoothstep(0.04f, 0.2f, change);
+
+    // ── Velocity diffusion (average with neighbors) ─────────────────────────
+    float2 vL = state_read.sample(smp, uv + float2(-px.x, 0)).gb;
+    float2 vR = state_read.sample(smp, uv + float2( px.x, 0)).gb;
+    float2 vU = state_read.sample(smp, uv + float2(0, -px.y)).gb;
+    float2 vD = state_read.sample(smp, uv + float2(0,  px.y)).gb;
+    float2 vAvg = (vL + vR + vU + vD) * 0.25f;
+    vel = mix(vel, vAvg, VEL_DIFFUSE);
+
+    // ── Typing impulse: push smoke radially outward from activity ───────────
+    // Scan a small neighborhood for change and compute a push direction
+    float2 pushDir = float2(0.0f);
+    float pushStr = 0.0f;
+    for (int dy = -2; dy <= 2; dy++) {
+        for (int dx = -2; dx <= 2; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            float2 nUV = uv + float2(float(dx), float(dy)) * px * 8.0f;
+            float nPrev = state_read.sample(smp, nUV).a;
+            float3 nTerm = terminal.sample(smp, nUV).rgb;
+            float nLuma = dot(nTerm, float3(0.299f, 0.587f, 0.114f));
+            float nChange = smoothstep(0.04f, 0.2f, abs(nLuma - nPrev));
+            // Push away from the change source
+            float2 away = normalize(float2(float(-dx), float(-dy)) + 0.001f);
+            pushDir += away * nChange;
+            pushStr += nChange;
+        }
+    }
+    if (pushStr > 0.01f) {
+        pushDir /= pushStr;
+        vel += pushDir * pushStr * IMPULSE_STR * 0.2f;
+    }
+    // Direct impulse at this pixel — direction from position hash (stable)
+    vel += float2(hash21(uv * 100.0f) - 0.5f,
+                  hash21(uv * 100.0f + 7.1f) - 0.5f) * change * IMPULSE_STR;
+
+    // ── Buoyancy: smoke rises ───────────────────────────────────────────────
+    // Y increases downward in Ghostty, so "up" is negative Y
+    vel.y -= density * BUOYANCY;
+
+    // ── Ambient turbulence: curl noise keeps smoke alive ────────────────────
+    vel += curlNoise(uv * 4.0f, t) * TURBULENCE;
+
+    // ── Velocity decay ──────────────────────────────────────────────────────
+    vel *= VEL_DECAY;
+
+    // ── Semi-Lagrangian advection: trace back and sample ────────────────────
+    float2 backUV = uv - vel * 0.5f;  // trace backward through velocity field
+    float4 advected = state_read.sample(smp, backUV);
+    float newDensity = advected.r;
+
+    // ── Dissipation ─────────────────────────────────────────────────────────
+    newDensity *= DISSIPATION;
+
+    // ── Typing thins smoke locally (gentle, no blink) ──────────────────────
+    newDensity *= (1.0f - change * 0.15f);
+
+    // ── Passive smoke injection: smoke always seeps in ──────────────────────
+    float injectNoise = vnoise(uv * 6.0f + float2(t * 0.01f, t * 0.008f));
+    newDensity += SMOKE_INJECT * smoothstep(0.3f, 0.7f, injectNoise);
+    newDensity = clamp(newDensity, 0.0f, 1.0f);
+
+    // ── Pressure solve (simple divergence removal) ──────────────────────────
+    // One Jacobi iteration per frame — not perfect but stable and cheap
+    float dL = state_read.sample(smp, uv + float2(-px.x, 0)).r;
+    float dR = state_read.sample(smp, uv + float2( px.x, 0)).r;
+    float dU = state_read.sample(smp, uv + float2(0, -px.y)).r;
+    float dD = state_read.sample(smp, uv + float2(0,  px.y)).r;
+    float div = ((vR.x - vL.x) + (vD.y - vU.y)) * 0.5f;
+    vel -= float2(dR - dL, dD - dU) * 0.1f;  // pressure gradient correction
+
+    // ── Boundary ────────────────────────────────────────────────────────────
+    float bx = smoothstep(0.0f, 0.03f, uv.x) * smoothstep(1.0f, 0.97f, uv.x);
+    float by = smoothstep(0.0f, 0.03f, uv.y) * smoothstep(1.0f, 0.97f, uv.y);
+    float boundary = bx * by;
+    vel *= boundary;
+
+    state_write.write(float4(newDensity, vel.x, vel.y, termLuma), gid);
+}

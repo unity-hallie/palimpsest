@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Terrain — shader preview</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; width: 100vw; height: 100vh; overflow: hidden; }
+#container { position: relative; width: 100vw; height: 100vh; cursor: text; }
+#glcanvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+#input {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    opacity: 0; cursor: text; z-index: 10;
+    resize: none; border: none; outline: none;
+    background: transparent; color: transparent;
+    font-size: 15px; line-height: 22px;
+    font-family: monospace; padding: 16px;
+    caret-color: transparent;
+}
+#hint {
+    position: absolute; bottom: 14px; right: 18px;
+    color: rgba(255,255,255,0.22); font: 11px/1.5 monospace;
+    pointer-events: none; z-index: 20; text-align: right;
+}
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="glcanvas"></canvas>
+  <textarea id="input" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
+  <div id="hint">terrain.glsl · type to reshape the land</div>
+</div>
+<script>
+// ─── Text canvas (source heightmap) ──────────────────────────────────────────
+const textCanvas = document.createElement('canvas');
+const tx = textCanvas.getContext('2d');
+
+const FONT_SIZE   = 15;
+const LINE_HEIGHT = 22;
+const PAD         = 16;
+const FONT        = `${FONT_SIZE}px "JetBrains Mono","Fira Code","Cascadia Code","Consolas",monospace`;
+
+tx.font = FONT;
+const CHAR_W = tx.measureText('M').width;
+
+// Demo text:
+//   blank lines             → ocean (h ≈ 0.0)
+//   |||||| dense lines      → mountain ridges (h ≈ 0.35-0.45)
+//   code blocks             → highlands and forest (h ≈ 0.20-0.35)
+//   sparse word rows        → meadow / beach (h ≈ 0.08-0.18)
+const DEMO =
+`
+
+
+
+
+  ||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+  ||||||||||||||||||||||||  peak  ||||||||||||||||||||||||||||
+  ||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+
+
+
+  function heightField(terminal) {
+    const luma  = px => dot(px.rgb, vec3(0.299, 0.587, 0.114));
+    const h     = smooth(luma, radius = 0.09);
+    const slope = gradient(h);
+    const n     = cross(vec3(slope.x, slope.y, 1.0));
+    return { h, n, slope };
+  }
+  function light(normal, sun) {
+    const diffuse  = max(dot(normal, sun), 0.0);
+    const specular = pow(max(dot(reflect(-sun, normal), eye), 0.0), 80.0);
+    return ambient + diffuse * sunColor + specular * glint;
+  }
+  const biomes = {
+    ocean: h < 0.05,   beach:  h < 0.10,
+    grass: h < 0.20,   forest: h < 0.32,
+    rock:  h < 0.44,   snow:   h >= 0.44
+  };
+
+
+
+  meadow   grassland   heath   moor   fen   lea   dale   vale
+  pasture  savanna     steppe  field  glen  wold  weald  down
+
+
+
+  coast   shore   tideline   strand   foreshore   shingle   bar
+  estuary  delta  lagoon     inlet    cove    bay    firth    ria
+
+
+
+
+`;
+
+const input = document.getElementById('input');
+input.value = DEMO;
+
+// ─── Draw text to offscreen canvas ───────────────────────────────────────────
+function drawText() {
+    const W = textCanvas.width, H = textCanvas.height;
+    tx.fillStyle = '#050508';
+    tx.fillRect(0, 0, W, H);
+    tx.font = FONT;
+    tx.fillStyle = '#d8d4c0';
+    const cols  = Math.floor((W - PAD * 2) / CHAR_W);
+    const lines = input.value.split('\n');
+    let y = PAD + FONT_SIZE;
+    for (let li = 0; li < lines.length; li++) {
+        let line = lines[li];
+        while (line.length > cols) {
+            tx.fillText(line.slice(0, cols), PAD, y);
+            line = line.slice(cols);
+            y += LINE_HEIGHT;
+        }
+        tx.fillText(line, PAD, y);
+        y += LINE_HEIGHT;
+    }
+}
+
+// ─── WebGL ────────────────────────────────────────────────────────────────────
+const glCanvas = document.getElementById('glcanvas');
+const gl = glCanvas.getContext('webgl') || glCanvas.getContext('experimental-webgl');
+
+const VS = `
+attribute vec2 aPos;
+void main() { gl_Position = vec4(aPos, 0.0, 1.0); }
+`;
+
+const FS = `
+precision mediump float;
+uniform sampler2D iChannel0;
+uniform vec2      iResolution;
+uniform float     iTime;
+
+// Biome thresholds calibrated for wide-radius blur (r=0.09).
+// Blank screen ≈ 0.0  |  sparse text ≈ 0.08  |  dense code ≈ 0.30-0.45
+#define SEA_LEVEL     0.05
+#define BEACH_LEVEL   0.10
+#define GRASS_LEVEL   0.20
+#define FOREST_LEVEL  0.32
+#define ROCK_LEVEL    0.44
+#define WIND_SPEED    0.08
+#define CLOUD_SPEED   0.012
+
+float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+
+float hash21(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+float noise(vec2 p) {
+    vec2 i = floor(p); vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(
+        mix(hash21(i),               hash21(i + vec2(1.0, 0.0)), f.x),
+        mix(hash21(i + vec2(0.0,1.0)), hash21(i + vec2(1.0,1.0)), f.x),
+        f.y);
+}
+float fbm(vec2 p) {
+    float v  = noise(p)                          * 0.57;
+    v += noise(p * 2.1 + vec2(1.7,  9.2))        * 0.28;
+    v += noise(p * 4.3 + vec2(8.3,  2.8))        * 0.15;
+    return v;
+}
+
+// Wide-radius Gaussian.  r=0.09 ≈ 173px on 1920-wide.
+// Fully dissolves individual characters into smooth density regions.
+float getH(vec2 uv) {
+    float r = 0.09;
+    float h = 0.0;
+    h += luma(texture2D(iChannel0, uv + vec2(-r, -r)).rgb) * 0.0625;
+    h += luma(texture2D(iChannel0, uv + vec2( 0.,-r)).rgb) * 0.125;
+    h += luma(texture2D(iChannel0, uv + vec2( r, -r)).rgb) * 0.0625;
+    h += luma(texture2D(iChannel0, uv + vec2(-r,  0.)).rgb) * 0.125;
+    h += luma(texture2D(iChannel0, uv               ).rgb) * 0.25;
+    h += luma(texture2D(iChannel0, uv + vec2( r,  0.)).rgb) * 0.125;
+    h += luma(texture2D(iChannel0, uv + vec2(-r,  r)).rgb) * 0.0625;
+    h += luma(texture2D(iChannel0, uv + vec2( 0., r)).rgb) * 0.125;
+    h += luma(texture2D(iChannel0, uv + vec2( r,  r)).rgb) * 0.0625;
+    return h;
+}
+
+// Surface normals from fbm noise — completely independent of text.
+// Text drives biome (what terrain), noise drives surface (what it looks like).
+// bumpScale: low for meadows, high for rocky peaks.
+vec3 terrainNormal(vec2 uv, float bumpScale) {
+    float eps   = 0.004;
+    float scale = 11.0;
+    vec2  seed  = vec2(3.1, 5.7);
+    float nL = fbm((uv - vec2(eps, 0.0)) * scale + seed);
+    float nR = fbm((uv + vec2(eps, 0.0)) * scale + seed);
+    float nD = fbm((uv - vec2(0.0, eps)) * scale + seed);
+    float nU = fbm((uv + vec2(0.0, eps)) * scale + seed);
+    return normalize(vec3((nL - nR) * bumpScale, (nD - nU) * bumpScale, 1.0));
+}
+
+void main() {
+    vec2  uv = gl_FragCoord.xy / iResolution.xy;
+    float t  = iTime;
+
+    // ── Height (text density → elevation) ────────────────────────────────────
+    float h = getH(uv);
+    // Slight fbm jitter so biome borders look organic, not density-contour
+    h += fbm(uv * 6.0 + vec2(2.4, 8.1)) * 0.025;
+
+    // ── Surface normal (craggier at higher elevations) ────────────────────────
+    float bumpScale = mix(0.7, 4.0, smoothstep(GRASS_LEVEL, ROCK_LEVEL, h));
+    vec3  normal    = terrainNormal(uv, bumpScale);
+
+    // ── Breeze on grass and forest ────────────────────────────────────────────
+    float grassFac  = step(BEACH_LEVEL, h) * (1.0 - step(GRASS_LEVEL,  h));
+    float forestFac = step(GRASS_LEVEL, h) * (1.0 - step(FOREST_LEVEL, h));
+    float bAmt      = grassFac * 0.13 + forestFac * 0.05;
+    vec2  bUV = uv * 13.0 + vec2(t * WIND_SPEED, t * WIND_SPEED * 0.43);
+    float bx  = (noise(bUV)                  - 0.5) * 2.0 * bAmt;
+    float by  = (noise(bUV + vec2(4.1, 7.3)) - 0.5) * 2.0 * bAmt;
+    normal = normalize(normal + vec3(bx, by, 0.0));
+
+    // ── Wave normals on water ─────────────────────────────────────────────────
+    vec3  surfN  = normal;
+    float inSea  = 1.0 - step(SEA_LEVEL, h);
+    vec2  wv1    = uv * 22.0 + vec2( t * 0.22,  t * 0.11);
+    vec2  wv2    = uv * 14.0 + vec2(-t * 0.14,  t * 0.20);
+    float wx     = (noise(wv1) - 0.5) * 0.24 * inSea;
+    float wy     = (noise(wv2) - 0.5) * 0.24 * inSea;
+    surfN        = normalize(normal + vec3(wx, wy, 0.0));
+
+    // ── Sun (from NW — classic cartographic hillshade) ────────────────────────
+    vec3  sunDir  = normalize(vec3(-0.42, 0.58, 1.25));
+    vec3  sunCol  = vec3(1.00, 0.94, 0.80);
+    vec3  skyAmb  = vec3(0.50, 0.70, 0.95);
+    float diff    = max(dot(surfN, sunDir), 0.0);
+    vec3  totalLt = skyAmb * 0.30 + sunCol * diff * 0.86;
+
+    // ── Biome colors ──────────────────────────────────────────────────────────
+    vec3 color;
+
+    if (h < SEA_LEVEL) {
+        float depth = h / SEA_LEVEL;
+        color = mix(vec3(0.04, 0.10, 0.34), vec3(0.09, 0.32, 0.62), depth * depth);
+        vec3  halfV = normalize(sunDir + vec3(0.0, 0.0, 1.0));
+        float spec  = pow(max(dot(surfN, halfV), 0.0), 80.0) * 0.75;
+        color = color * totalLt + sunCol * spec;
+
+    } else if (h < BEACH_LEVEL) {
+        float s = (h - SEA_LEVEL) / (BEACH_LEVEL - SEA_LEVEL);
+        color = mix(vec3(0.62, 0.55, 0.37), vec3(0.84, 0.77, 0.51), s) * totalLt;
+
+    } else if (h < GRASS_LEVEL) {
+        float s = (h - BEACH_LEVEL) / (GRASS_LEVEL - BEACH_LEVEL);
+        color = mix(vec3(0.52, 0.73, 0.27), vec3(0.37, 0.60, 0.18), s) * totalLt;
+
+    } else if (h < FOREST_LEVEL) {
+        float s = (h - GRASS_LEVEL) / (FOREST_LEVEL - GRASS_LEVEL);
+        color = mix(vec3(0.20, 0.46, 0.13), vec3(0.10, 0.30, 0.09), s);
+        vec3  halfV = normalize(sunDir + vec3(0.0, 0.0, 1.0));
+        float lSpc  = pow(max(dot(surfN, halfV), 0.0), 20.0) * 0.10;
+        color = color * totalLt + sunCol * lSpc;
+
+    } else if (h < ROCK_LEVEL) {
+        float s = (h - FOREST_LEVEL) / (ROCK_LEVEL - FOREST_LEVEL);
+        color = mix(vec3(0.52, 0.46, 0.37), vec3(0.65, 0.58, 0.50), s) * totalLt;
+
+    } else {
+        float s = clamp((h - ROCK_LEVEL) / (1.0 - ROCK_LEVEL), 0.0, 1.0);
+        color = mix(vec3(0.75, 0.78, 0.84), vec3(0.93, 0.96, 1.00), s);
+        float sSpc = pow(max(dot(surfN, sunDir), 0.0), 12.0) * 0.35;
+        color = color * totalLt + sunCol * sSpc * 0.3;
+    }
+
+    // ── Shoreline foam ────────────────────────────────────────────────────────
+    float sInner = smoothstep(SEA_LEVEL - 0.014, SEA_LEVEL,       h);
+    float sOuter = smoothstep(SEA_LEVEL + 0.014, SEA_LEVEL,       h);
+    float fNoise = fbm(uv * 40.0 + vec2(t * 0.36, -t * 0.19));
+    float foam   = smoothstep(0.40, 0.56, fNoise);
+    color = mix(color, vec3(0.92, 0.95, 1.00), foam * sInner * sOuter * 0.78);
+
+    // ── Cloud shadows ─────────────────────────────────────────────────────────
+    vec2  cUV   = uv * 2.8 + vec2(t * CLOUD_SPEED, t * CLOUD_SPEED * 0.40);
+    float cloud = fbm(cUV) * fbm(cUV * 1.9 + vec2(4.3, 1.2));
+    color *= 1.0 - smoothstep(0.17, 0.30, cloud) * 0.28;
+
+    // ── Valley mist ───────────────────────────────────────────────────────────
+    float mist = smoothstep(BEACH_LEVEL, SEA_LEVEL, h);
+    color = mix(color, skyAmb * 0.65, mist * 0.15);
+
+    gl_FragColor = vec4(color, 1.0);
+}
+`;
+
+function compile(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+        console.error(gl.getShaderInfoLog(s));
+    return s;
+}
+
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(prog);
+gl.useProgram(prog);
+
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+    -1,-1, 1,-1, -1,1,  1,-1, 1,1, -1,1
+]), gl.STATIC_DRAW);
+const aPos = gl.getAttribLocation(prog, 'aPos');
+gl.enableVertexAttribArray(aPos);
+gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+const uRes  = gl.getUniformLocation(prog, 'iResolution');
+const uTime = gl.getUniformLocation(prog, 'iTime');
+const uCh0  = gl.getUniformLocation(prog, 'iChannel0');
+
+const tex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, tex);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+function resize() {
+    const W = window.innerWidth, H = window.innerHeight;
+    textCanvas.width = W; textCanvas.height = H;
+    glCanvas.width   = W; glCanvas.height   = H;
+    gl.viewport(0, 0, W, H);
+    gl.uniform2f(uRes, W, H);
+}
+
+['input','keydown','keyup','click','mouseup'].forEach(ev =>
+    input.addEventListener(ev, drawText));
+
+const t0 = Date.now();
+function frame() {
+    drawText();
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, textCanvas);
+    gl.uniform1f(uTime, (Date.now() - t0) / 1000.0);
+    gl.uniform1i(uCh0, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    requestAnimationFrame(frame);
+}
+
+window.addEventListener('resize', resize);
+resize();
+input.focus();
+frame();
+</script>
+</body>
+</html>

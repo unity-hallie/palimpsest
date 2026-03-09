@@ -1,0 +1,663 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Terraform</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; width: 100vw; height: 100vh; overflow: hidden; }
+#container { position: relative; width: 100vw; height: 100vh; cursor: text; }
+#glcanvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+#input {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    opacity: 0; cursor: text; z-index: 10;
+    resize: none; border: none; outline: none;
+    background: transparent; color: transparent;
+    font-size: 15px; line-height: 22px;
+    font-family: monospace; padding: 16px;
+    caret-color: transparent;
+}
+#hint {
+    position: absolute; bottom: 14px; right: 18px;
+    color: rgba(255,255,255,0.20); font: 11px/1.5 monospace;
+    pointer-events: none; z-index: 20; text-align: right;
+}
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="glcanvas"></canvas>
+  <textarea id="input" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
+  <div id="hint">terraform · type to begin</div>
+</div>
+<script>
+// ─── Text canvas (current frame) ──────────────────────────────────────────────
+const textCanvas = document.createElement('canvas');
+const tx = textCanvas.getContext('2d');
+
+// ─── Ghost canvas (persistent fade — deleted text melts out over ~0.6s) ───────
+// Each frame: darken ghost toward background, then overdraw fresh text.
+// The GPU reads ghostCanvas, so the terraform signal has memory of past text.
+const ghostCanvas = document.createElement('canvas');
+const gc = ghostCanvas.getContext('2d');
+
+const FONT_SIZE   = 15;
+const LINE_HEIGHT = 22;
+const PAD         = 16;
+const FONT        = `${FONT_SIZE}px "JetBrains Mono","Fira Code","Cascadia Code","Consolas",monospace`;
+tx.font = FONT;
+const CHAR_W = tx.measureText('M').width;
+
+const DEMO =
+`
+
+
+
+
+   |||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+   |||||||||||||||||||||||  ancient ridge  |||||||||||||||||||||||||||
+   |||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||
+
+
+
+
+   the terminal is barren.
+   type into the dead world and watch it breathe.
+
+   text becomes topography.
+   density becomes elevation.
+   time becomes geology.
+
+   a session is a day.
+   a page of work is a continent.
+   blank lines are the sea.
+
+
+
+
+   coast   shore   tideline   strand   estuary   inlet   bay
+
+
+
+
+`;
+
+const input = document.getElementById('input');
+input.value = DEMO;
+
+function drawText() {
+    const W = textCanvas.width, H = textCanvas.height;
+
+    // 1. Render current text cleanly to textCanvas
+    tx.fillStyle = '#000006';
+    tx.fillRect(0, 0, W, H);
+    tx.font = FONT;
+    tx.fillStyle = '#d0dcea';
+    const cols  = Math.floor((W - PAD * 2) / CHAR_W);
+    const lines = input.value.split('\n');
+    let y = PAD + FONT_SIZE;
+    for (let li = 0; li < lines.length; li++) {
+        let line = lines[li];
+        while (line.length > cols) {
+            tx.fillText(line.slice(0, cols), PAD, y);
+            line = line.slice(cols);
+            y += LINE_HEIGHT;
+        }
+        tx.fillText(line, PAD, y);
+        y += LINE_HEIGHT;
+    }
+
+    // 2. Fade ghostCanvas toward background (~0.022 alpha per frame = ~0.6s half-life at 60fps)
+    gc.globalAlpha = 0.022;
+    gc.fillStyle = '#000006';
+    gc.fillRect(0, 0, W, H);
+
+    // 3. Overdraw fresh text at full brightness — current chars stay bright, deleted chars fade
+    gc.globalAlpha = 1.0;
+    gc.drawImage(textCanvas, 0, 0);
+}
+
+// ─── WebGL ────────────────────────────────────────────────────────────────────
+const glCanvas = document.getElementById('glcanvas');
+const gl = glCanvas.getContext('webgl') || glCanvas.getContext('experimental-webgl');
+
+const VS = `attribute vec2 aPos; void main() { gl_Position = vec4(aPos,0.0,1.0); }`;
+
+const FS = `
+precision highp float;
+uniform sampler2D iChannel0;
+uniform vec2      iResolution;
+uniform float     iTime;
+
+// ── Tuning ────────────────────────────────────────────────────────────────────
+#define TERRAIN_SCALE  3.4     // was 2.8 — finer detail
+#define DAY_DURATION   240.0   // seconds per day (2× longer)
+#define YEAR_DURATION  1920.0  // 8 day-cycles per year — seasons visible within the hour
+#define AXIAL_TILT     0.42    // radians (~24°) — tilted axis
+#define LIFE_DURATION  3600.0  // seconds for full terraforming (1 hour)
+#define SEA_LEVEL      0.37
+#define BEACH_LEVEL    0.50
+#define GRASS_LEVEL    0.60
+#define FOREST_LEVEL   0.70
+#define ROCK_LEVEL     0.82
+#define WIND_SPEED     0.038
+#define CLOUD_SPEED    0.011
+#define TWO_PI         6.28318530718
+
+float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+
+float hash21(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+float noise(vec2 p) {
+    vec2 i = floor(p); vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(
+        mix(hash21(i),               hash21(i + vec2(1.0, 0.0)), f.x),
+        mix(hash21(i + vec2(0.0,1.0)), hash21(i + vec2(1.0,1.0)), f.x),
+        f.y);
+}
+float fbm(vec2 p) {
+    float v  = noise(p)                           * 0.5000;
+    v       += noise(p * 2.01 + vec2(1.7,  9.2))  * 0.2500;
+    v       += noise(p * 4.03 + vec2(8.3,  2.8))  * 0.1250;
+    v       += noise(p * 8.07 + vec2(3.1,  7.4))  * 0.0625;
+    v       += noise(p * 16.1 + vec2(5.4,  1.2))  * 0.0313; // 5th octave — finer ridgelines
+    return v;
+}
+
+// Double-warped terrain — coastlines that look geological
+float terrain(vec2 p) {
+    vec2 w1 = vec2(fbm(p + vec2(1.3,0.4)), fbm(p + vec2(8.2,3.7)));
+    vec2 w2 = vec2(fbm(p + w1*1.4 + vec2(2.8,6.1)), fbm(p + w1*1.4 + vec2(5.4,0.9)));
+    return fbm(p + w2 * 0.8);
+}
+
+// Normals from single-pass fbm (cheaper than calling terrain() 4 times)
+vec3 fastNormal(vec2 p, float bump) {
+    float eps = 0.004, sc = 9.5;
+    float nL = fbm((p - vec2(eps,0.0)) * sc);
+    float nR = fbm((p + vec2(eps,0.0)) * sc);
+    float nD = fbm((p - vec2(0.0,eps)) * sc);
+    float nU = fbm((p + vec2(0.0,eps)) * sc);
+    float ar = iResolution.x / iResolution.y;
+    return normalize(vec3((nL-nR)*bump*ar, (nD-nU)*bump, 1.0));
+}
+
+// Wide-radius Gaussian blur of terminal texture → life signal
+// r=0.09 ≈ 173px on 1920-wide, fully dissolves characters into density regions
+float getLifeH(vec2 uv) {
+    float r = 0.09, h = 0.0;
+    h += luma(texture2D(iChannel0, uv+vec2(-r,-r)).rgb)*0.0625;
+    h += luma(texture2D(iChannel0, uv+vec2( 0.,-r)).rgb)*0.125;
+    h += luma(texture2D(iChannel0, uv+vec2( r,-r)).rgb)*0.0625;
+    h += luma(texture2D(iChannel0, uv+vec2(-r, 0.)).rgb)*0.125;
+    h += luma(texture2D(iChannel0, uv            ).rgb)*0.25;
+    h += luma(texture2D(iChannel0, uv+vec2( r, 0.)).rgb)*0.125;
+    h += luma(texture2D(iChannel0, uv+vec2(-r, r)).rgb)*0.0625;
+    h += luma(texture2D(iChannel0, uv+vec2( 0., r)).rgb)*0.125;
+    h += luma(texture2D(iChannel0, uv+vec2( r, r)).rgb)*0.0625;
+    return h;
+}
+
+void main() {
+    vec2  uv  = gl_FragCoord.xy / iResolution.xy;
+    float ar  = iResolution.x / iResolution.y;
+    vec2  p   = vec2(uv.x * ar, uv.y);
+    float t   = iTime;
+
+    // ── Terrain height + normals ───────────────────────────────────────────────
+    float h = terrain(p * TERRAIN_SCALE);
+    // Lift terrain globally to reduce inland depressions, then apply L→R gradient
+    h = h * 0.84 + 0.10;
+    h = clamp(h + (0.58 - uv.x) * 0.36, 0.0, 1.0);
+    // Exaggerate peak heights — push high terrain into dramatic ridgelines
+    h += smoothstep(FOREST_LEVEL, 1.0, h) * 0.24;
+    h  = clamp(h, 0.0, 1.0);
+    float bump   = mix(1.0, 9.0, smoothstep(GRASS_LEVEL, ROCK_LEVEL, h));
+    vec3  normal = fastNormal(p, bump);
+
+    // ── Terraforming progress ─────────────────────────────────────────────────
+    float textDensity  = getLifeH(uv);
+    float lifeProgress = smoothstep(0.0, LIFE_DURATION, t);
+    float elevBonus    = smoothstep(1.0, 0.3, h);  // low areas green up first
+    float lifeAmount   = smoothstep(0.0, 1.0, textDensity * lifeProgress * elevBonus * 4.5);
+
+    // Ice: dominant at start, fully gone by 30% progress (global baseline)
+    float iceAmount = smoothstep(0.30, 0.02, lifeProgress);
+    // Rivers: meltwater channels appear during thaw (5%→45%)
+    float riverMelt = smoothstep(0.05, 0.45, lifeProgress);
+    // Lowland mask: beach+grass elevation, above sea
+    float isLowland = (1.0 - smoothstep(BEACH_LEVEL, FOREST_LEVEL, h)) * step(SEA_LEVEL, h);
+
+    // Mountain snow: builds mid-progress on high peaks, retreats as planet warms
+    float snowProgress = smoothstep(0.28, 0.56, lifeProgress);
+    float snowMelt     = smoothstep(0.80, 1.00, lifeProgress);
+    float snowLine     = mix(ROCK_LEVEL + 0.03, 0.84, snowMelt);
+    float snowCover    = snowProgress * (1.0 - snowMelt * 0.88);
+
+    // ── Day/night: axial tilt + seasons + planetary terminator ───────────────
+    float dayPhase  = t * TWO_PI / DAY_DURATION;
+    float yearPhase = t * TWO_PI / YEAR_DURATION;
+
+    // Axial tilt: sun's declination drifts north/south over the year
+    float declination = sin(yearPhase) * AXIAL_TILT;
+
+    // Latitude from y-position: center row = equator, ±edges = ±52° lat
+    float latitude = (uv.y - 0.5) * 1.85;
+
+    // Proper solar elevation:
+    //   sin(alt) = sin(lat)·sin(dec) + cos(lat)·cos(dec)·sin(hourAngle)
+    float hourAngle = dayPhase + (uv.x - 0.5) * 2.6;
+    float sunElev   = sin(latitude)*sin(declination)
+                    + cos(latitude)*cos(declination)*sin(hourAngle);
+    float sunAz     = cos(dayPhase);
+    float isDay     = smoothstep(-0.12, 0.20, sunElev);
+    float isDawnDusk = smoothstep(0.45, 0.0, abs(sunElev)) * isDay;
+    vec3 sunDir = normalize(vec3(sunAz * 0.6, 0.5, max(sunElev, 0.0) * 1.3 + 0.05));
+
+    // Solar insolation: heat reaching this latitude given the season
+    // Peaks where latitude ≈ declination (sub-solar point migrates N/S)
+    float solarInsolation = max(0.0, cos(latitude - declination));
+    // Instantaneous solar heat: only when sun is up, scaled by insolation
+    float solarHeat = clamp(sunElev, 0.0, 1.0) * solarInsolation;
+
+    // Local ice: sun melts ice on day side + near equator; poles/night stay frozen
+    // The lit hemisphere thaws first — terminator has a soft warm edge
+    float sunIceMelt = solarHeat * lifeProgress * 2.2;
+    float localIce   = clamp(iceAmount - sunIceMelt * 0.70, 0.0, 1.0);
+
+    // Sun disc: midday white → orange (gated by isDay — only lit hemisphere)
+    vec3 sunIce    = vec3(0.84, 0.91, 1.00);
+    vec3 sunBarren = mix(vec3(0.94,0.84,0.58), vec3(1.00,0.93,0.78), lifeAmount);
+    vec3 sunMidday = mix(sunIce, sunBarren, smoothstep(0.0, 0.3, lifeProgress));
+    vec3 sunCol    = sunMidday * isDay;
+
+    // Horizon glow: fires near the terminator on BOTH sides (this is where the colour lives).
+    // NOT gated by isDay — the warm band straddles the day/night boundary.
+    float horizGlow = smoothstep(0.38, 0.0, abs(sunElev));          // peaks at sunElev=0
+    vec3  horizCol  = mix(vec3(0.55,0.72,1.00), vec3(1.00,0.48,0.12), lifeProgress);
+    // Add warm rim to sunCol on the lit side
+    sunCol = mix(sunCol, horizCol * 0.85, horizGlow * isDay * 0.70);
+
+    // Sky ambient: night → horizon glow band → day
+    vec3 nightAmb  = mix(vec3(0.05, 0.07, 0.16), vec3(0.03, 0.04, 0.10), lifeProgress);
+    vec3 iceAmbDay = vec3(0.68, 0.76, 0.92);
+    // Dawn/dusk ambient: warm orange-pink at the terminator, visible from both sides
+    vec3 horizAmb  = mix(vec3(0.45,0.55,0.80), vec3(0.55,0.28,0.10), lifeProgress);
+    vec3 dayAmb    = mix(iceAmbDay, mix(vec3(0.42,0.34,0.24), vec3(0.46,0.66,0.92), lifeAmount), smoothstep(0.0,0.35,lifeProgress));
+    // Blend: night → horizon glow → full day
+    vec3 skyAmb    = mix(nightAmb, mix(horizAmb, dayAmb, smoothstep(-0.1, 0.5, sunElev)), isDay);
+    // Horizon glow tints the sky amber/orange near the terminator regardless of day/night
+    skyAmb = mix(skyAmb, horizCol * 0.55, horizGlow * 0.45);
+
+    // ── Breeze on vegetation ──────────────────────────────────────────────────
+    float grassFac  = step(BEACH_LEVEL,h) * (1.0 - step(GRASS_LEVEL,h));
+    float forestFac = step(GRASS_LEVEL,h) * (1.0 - step(FOREST_LEVEL,h));
+    float bAmt = (grassFac*0.11 + forestFac*0.045) * lifeAmount;
+    vec2  bUV  = p*10.0 + vec2(t*WIND_SPEED, t*WIND_SPEED*0.43);
+    float bx   = (noise(bUV)               - 0.5) * 2.0 * bAmt;
+    float by   = (noise(bUV+vec2(4.1,7.3)) - 0.5) * 2.0 * bAmt;
+    normal = normalize(normal + vec3(bx, by, 0.0));
+
+    // ── Wave normals on water ─────────────────────────────────────────────────
+    float inSea   = 1.0 - step(SEA_LEVEL, h);
+    float waveAmp = mix(0.08, 0.22, lifeAmount);
+    vec2  wv1 = p*16.0 + vec2( t*0.20,  t*0.10);
+    vec2  wv2 = p*10.0 + vec2(-t*0.13,  t*0.18);
+    // Water uses a flat base normal — terrain bumps don't show through the surface
+    vec3  waterBase = mix(normal, vec3(0.0, 0.0, 1.0), inSea);
+    vec3  surfN = normalize(waterBase + vec3((noise(wv1)-0.5)*waveAmp*inSea, (noise(wv2)-0.5)*waveAmp*inSea, 0.0));
+
+    // ── Lighting ──────────────────────────────────────────────────────────────
+    float diff      = max(dot(surfN, sunDir), 0.0) * isDay;
+    float northFace = 1.0 - max(dot(normal, normalize(vec3(0.5,-0.6,0.8))), 0.0);
+    float ao        = mix(1.0, mix(0.45, 0.58, smoothstep(0.0,0.4,lifeProgress)), northFace*northFace*0.70);
+    vec3  ltotal    = (skyAmb * 0.22 + sunCol * diff * 0.95) * ao;
+    // Ice bounce: cool sky reflection off snow — only during day, uses local ice
+    vec3  ltotalIce = ltotal + iceAmbDay * 0.18 * localIce * isDay;
+
+    // ── River channels (meltwater carved through lowlands) ─────────────────────
+    float riverH   = fbm(p * TERRAIN_SCALE * 1.8 + vec2(3.3, 7.1));
+    float riverCh  = smoothstep(0.51, 0.55, riverH) * (1.0 - smoothstep(0.55, 0.59, riverH));
+    float riverVis = riverCh * isLowland * riverMelt * (1.0 - lifeAmount * 0.8);
+
+    // ── Biome colors: ice / barren-grey / living ──────────────────────────────
+    // Barren = grey/charcoal dirt (no red/orange). Living = carbon soil → green.
+    vec3 iColor = vec3(0.0);
+    vec3 bColor = vec3(0.0);
+    vec3 lColor = vec3(0.0);
+
+    if (h < SEA_LEVEL) {
+        float depth = h / SEA_LEVEL;
+        // Ice sea: desaturated grey-white — frozen inland lakes look like ice, not ocean
+        iColor = mix(vec3(0.68,0.74,0.84), vec3(0.78,0.84,0.92), depth*depth);
+        // Barren sea: cold dark grey-slate (iron-poor, no warm murk)
+        bColor = mix(vec3(0.10,0.11,0.14), vec3(0.20,0.22,0.26), depth*depth);
+        lColor = mix(vec3(0.03,0.08,0.30), vec3(0.08,0.28,0.58), depth*depth);
+        vec3  halfV = normalize(sunDir + vec3(0.0,0.0,1.0));
+        float spec  = pow(max(dot(surfN,halfV),0.0), 85.0) * 0.75 * isDay;
+        iColor = iColor * ltotalIce + sunCol * spec * 1.3;
+        bColor = bColor * ltotal    + sunCol * spec * 0.3;
+        lColor = lColor * ltotal    + sunCol * spec;
+
+    } else if (h < BEACH_LEVEL) {
+        float s = (h-SEA_LEVEL)/(BEACH_LEVEL-SEA_LEVEL);
+        iColor = mix(vec3(0.80,0.87,0.97), vec3(0.89,0.94,1.00), s) * ltotalIce;
+        // Barren beach: grey clay/silt, no warm tan
+        bColor = mix(vec3(0.30,0.29,0.27), vec3(0.40,0.38,0.34), s) * ltotal;
+        // Living beach: wet dark sand → pale sand (wetter = darker near water)
+        lColor = mix(vec3(0.42,0.39,0.32), vec3(0.72,0.66,0.48), s) * ltotal;
+
+    } else if (h < GRASS_LEVEL) {
+        float s = (h-BEACH_LEVEL)/(GRASS_LEVEL-BEACH_LEVEL);
+        iColor = mix(vec3(0.84,0.91,0.98), vec3(0.78,0.87,0.96), s) * ltotalIce;
+        // Barren: grey dust/dirt
+        bColor = mix(vec3(0.32,0.30,0.27), vec3(0.40,0.38,0.34), s) * ltotal;
+        // Living: carbon-black soil → grass (soil darkens first, then greens)
+        vec3 carbonSoil = mix(vec3(0.09,0.08,0.06), vec3(0.07,0.07,0.05), s);
+        vec3 grassGreen = mix(vec3(0.52,0.72,0.26), vec3(0.37,0.60,0.17), s);
+        lColor = mix(carbonSoil, grassGreen, smoothstep(0.30, 0.75, lifeAmount)) * ltotal;
+
+    } else if (h < FOREST_LEVEL) {
+        float s = (h-GRASS_LEVEL)/(FOREST_LEVEL-GRASS_LEVEL);
+        iColor = mix(vec3(0.89,0.94,0.99), vec3(0.93,0.97,1.00), s) * ltotalIce;
+        // Barren: dark charcoal-grey rock
+        bColor = mix(vec3(0.26,0.25,0.22), vec3(0.22,0.21,0.20), s) * ltotal;
+        // Living: deep carbon soil → dark forest (slower greening at altitude)
+        vec3 carbonDeep = mix(vec3(0.07,0.06,0.04), vec3(0.05,0.05,0.04), s);
+        vec3 forestGreen = mix(vec3(0.19,0.44,0.12), vec3(0.09,0.28,0.07), s);
+        vec3 halfV2 = normalize(sunDir+vec3(0.0,0.0,1.0));
+        float lSpc = pow(max(dot(surfN,halfV2),0.0),22.0)*0.09*isDay;
+        lColor = mix(carbonDeep, forestGreen, smoothstep(0.40, 0.82, lifeAmount)) * ltotal + sunCol * lSpc;
+
+    } else if (h < ROCK_LEVEL) {
+        float s = (h-FOREST_LEVEL)/(ROCK_LEVEL-FOREST_LEVEL);
+        iColor = mix(vec3(0.89,0.93,0.99), vec3(0.94,0.97,1.00), s) * ltotalIce;
+        // Barren: neutral grey slate
+        bColor = mix(vec3(0.28,0.27,0.26), vec3(0.22,0.22,0.21), s) * ltotal;
+        lColor = mix(vec3(0.48,0.43,0.36), vec3(0.62,0.56,0.47), s) * ltotal;
+
+    } else {
+        float s = clamp((h-ROCK_LEVEL)/(1.0-ROCK_LEVEL), 0.0, 1.0);
+        iColor = mix(vec3(0.92,0.96,1.00), vec3(0.99,1.00,1.00), s) * ltotalIce;
+        // Barren peaks: dark basalt grey
+        bColor = mix(vec3(0.20,0.20,0.20), vec3(0.38,0.37,0.36), s) * ltotal;
+        lColor = mix(vec3(0.74,0.78,0.84), vec3(0.93,0.96,1.00), s);
+        float sSpc = pow(max(dot(surfN,sunDir),0.0),14.0)*0.40*isDay;
+        lColor = lColor * ltotal + sunCol * sSpc * 0.35;
+    }
+
+    // Three-way blend: ice → barren → living
+    // localIce makes the day side thaw first; poles stay white longer
+    float iceThaw  = smoothstep(0.0, 0.35, lifeProgress);
+    float localThaw = clamp(iceThaw + sunIceMelt * 0.55, 0.0, 1.0);
+    vec3  color    = mix(mix(iColor, bColor, localThaw), lColor, lifeAmount);
+
+    // ── Mountain snow caps ────────────────────────────────────────────────────
+    // Noisy, gradual snowline — no hard edge, retreats on warm/day side
+    float snowEdgeNoise = (noise(p * 5.5 + vec2(3.1, 7.4)) - 0.5) * 0.045;
+    float snowAmt = smoothstep(snowLine + snowEdgeNoise,
+                               snowLine + snowEdgeNoise + 0.13, h)
+                  * snowCover * (1.0 - solarHeat * lifeProgress * 0.9);
+    if (snowAmt > 0.01) {
+        float sSpcSn = pow(max(dot(surfN, sunDir), 0.0), 20.0) * 0.55 * isDay;
+        vec3  snowPx = vec3(0.87, 0.92, 0.98) * ltotal + sunCol * sSpcSn;
+        color = mix(color, snowPx, snowAmt);
+    }
+
+    // ── Ice fractures (blue-shadow cracks in the ice) ─────────────────────────
+    float aboveSea = step(SEA_LEVEL, h) * step(h, FOREST_LEVEL);
+    if (aboveSea > 0.5 && localIce > 0.02) {
+        float iceLine = smoothstep(0.59, 0.65, fbm(p * 22.0 + vec2(4.4,2.1)));
+        color += vec3(-0.09, -0.05, 0.10) * iceLine * localIce * aboveSea;
+    }
+
+    // ── Dry earth cracks (barren phase, post-thaw) ─────────────────────────────
+    if (aboveSea > 0.5 && lifeAmount < 0.92 && iceAmount < 0.3) {
+        float crackLine = smoothstep(0.60, 0.67, fbm(p * 19.0 + vec2(2.2,7.1)));
+        color -= vec3(0.05, 0.04, 0.03) * crackLine * (1.0 - lifeAmount) * (1.0 - iceAmount) * aboveSea;
+    }
+
+    // ── Rivers ────────────────────────────────────────────────────────────────
+    if (riverVis > 0.01) {
+        vec3 riverWater = mix(vec3(0.55,0.72,0.92), vec3(0.10,0.34,0.62), smoothstep(0.1,0.5,lifeProgress));
+        vec3 halfVr = normalize(sunDir + vec3(0.0,0.0,1.0));
+        float rSpec = pow(max(dot(normal,halfVr),0.0),60.0) * 0.5 * isDay;
+        color = mix(color, riverWater * ltotal + sunCol * rSpec, riverVis * 0.88);
+    }
+
+    // ── Shoreline foam ────────────────────────────────────────────────────────
+    float sInner = smoothstep(SEA_LEVEL - 0.010, SEA_LEVEL, h);
+    float sOuter = smoothstep(SEA_LEVEL + 0.010, SEA_LEVEL, h);
+    float foam   = smoothstep(0.43, 0.57, fbm(p * 14.0 + vec2(t * 0.36, -t * 0.19)));
+    vec3  foamCol = mix(vec3(0.88,0.92,0.98), mix(vec3(0.58,0.50,0.40), vec3(0.92,0.95,1.00), lifeAmount), smoothstep(0.0,0.25,lifeProgress));
+    color = mix(color, foamCol, foam * sInner * sOuter * 0.80);
+
+    // (stars removed — day/night is a planetary terminator sweep across the map)
+
+    // ── Aurora: curved oval ring around poles, diffused on land + reflected in water
+    float auroraVis = iceAmount * (1.0 - isDay);
+    vec3  auroraAccum = vec3(0.0);  // saved for land/water reuse below
+    if (auroraVis > 0.01) {
+        // Distance from pole *point* (top-center / bottom-center) in UV space.
+        // This makes the oval curve naturally across the screen — no Mercator bands.
+        vec2  dN = vec2(uv.x - 0.5, uv.y - 1.0);
+        vec2  dS = vec2(uv.x - 0.5, uv.y - 0.0);
+        float distN = length(dN);
+        float distS = length(dS);
+
+        // Aurora ring radius ~0.32 UV units from each pole.
+        // Inside and outside the ring = no aurora; on the ring = glow.
+        // This naturally gives LESS aurora right at the pole (inside the oval).
+        float R = 0.32, W = 0.075;
+        float northBand = smoothstep(R - W, R, distN) * (1.0 - smoothstep(R, R + W, distN));
+        float southBand = smoothstep(R - W, R, distS) * (1.0 - smoothstep(R, R + W, distS));
+        float auroraMask = max(northBand, southBand);
+
+        if (auroraMask > 0.005) {
+            // Rays: thin vertical striations along the arc (curtain folds)
+            // Use arc-angle as the "x" coordinate so rays follow the curve
+            float angN  = atan(dN.x, -dN.y);  // angle around north pole
+            float angS  = atan(dS.x,  dS.y);  // angle around south pole
+            float arcX  = (distN < distS) ? angN : angS;
+            float rx    = arcX * 22.0 + t * 0.22;
+            float rays  = pow(abs(sin(rx)) * abs(sin(rx * 1.618 + 1.1)), 0.55);
+
+            // Slow curtain undulation along the arc
+            vec2  cUV    = vec2(arcX * 1.6 + t * 0.013, t * 0.005);
+            float curtain = sin(cUV.x * 5.4 + noise(cUV * 1.2) * 2.8) * 0.5 + 0.5;
+            curtain *= 0.50 + 0.50 * noise(vec2(cUV.x * 2.4, t * 0.07));
+
+            float intensity = rays * curtain * auroraMask * auroraVis;
+
+            // Color: green (O 557nm) with blue-teal variation
+            float cVar = noise(vec2(arcX * 3.8 + t * 0.010, t * 0.004));
+            vec3  aCol = mix(vec3(0.04, 0.90, 0.34), vec3(0.05, 0.44, 0.88), cVar * 0.55);
+
+            // Sky: additive glow
+            color += aCol * intensity * 0.22;
+
+            // Store for land scatter + water reflection below
+            auroraAccum = aCol * intensity;
+        }
+    }
+
+    // Aurora diffused onto land — faint ambient scatter off atmosphere/terrain
+    color += auroraAccum * (1.0 - inSea) * 0.06;
+    // Aurora reflected in water — water mirrors the sky above
+    color += auroraAccum * inSea * 0.18;
+
+    // ── Campfires near rivers at night ────────────────────────────────────────
+    // Rare warm glows — only where text is dense, in lowland areas post-thaw
+    float campVis = isLowland * (1.0 - isDay) * smoothstep(0.06, 0.24, lifeProgress)
+                  * (1.0 - localIce) * clamp(textDensity * 2.5, 0.0, 1.0);
+    if (campVis > 0.01) {
+        vec2  fireGrid  = floor(p * 14.0);  // coarser grid = fewer, bigger fires
+        vec3  fireAccum = vec3(0.0);
+        for (int di = -1; di <= 1; di++) {
+            for (int dj = -1; dj <= 1; dj++) {
+                vec2  ng   = fireGrid + vec2(float(di), float(dj));
+                float seed = hash21(ng + vec2(91.7, 47.3));
+                // ~5% of cells get a fire, only where text density is high
+                if (seed > 0.95 && textDensity > 0.38) {
+                    vec2  fPos    = (ng + 0.5) / 14.0;
+                    float dist    = length(p - fPos) * 14.0;
+                    float flicker = 0.60 + 0.40 * noise(vec2(seed*53.1, t*4.8 + seed*18.2));
+                    // Softer, wider glow
+                    float glow    = exp(-dist*dist*0.9) * flicker;
+                    float edgeT   = smoothstep(0.0, 1.8, dist);
+                    fireAccum += mix(vec3(1.00,0.72,0.18), vec3(0.85,0.22,0.03), edgeT) * glow;
+                }
+            }
+        }
+        color += fireAccum * campVis * 0.45;
+    }
+
+    // ── Cloud shadows (build with life) ──────────────────────────────────────
+    float cloudAmt = lifeAmount * isDay;
+    if (cloudAmt > 0.01) {
+        vec2  cUV   = uv * 2.2 + vec2(t*CLOUD_SPEED, t*CLOUD_SPEED*0.38);
+        float cloud = fbm(cUV) * fbm(cUV * 2.1 + vec2(4.3,1.2));
+        color *= 1.0 - smoothstep(0.15, 0.28, cloud) * 0.28 * cloudAmt;
+    }
+
+    // ── Ice overcast: soft diffuse grey veil (local — clears on warm/day side) ─
+    if (localIce > 0.02 && isDay > 0.05) {
+        vec2  cUV2  = uv * 1.6 + vec2(t*CLOUD_SPEED*0.55, -t*CLOUD_SPEED*0.27);
+        float iceCld = fbm(cUV2) * 0.45 + 0.20;
+        color = mix(color, skyAmb * 0.88, iceCld * localIce * isDay * 0.28);
+    }
+
+    // ── Valley mist / sea haze ────────────────────────────────────────────────
+    float mist = smoothstep(BEACH_LEVEL, SEA_LEVEL, h);
+    color = mix(color, skyAmb * 0.60, mist * 0.18);
+
+    // ── Night ocean: faint deep-blue ambient so the sea isn't pure void ───────
+    // Star/moonlight and atmospheric backscatter give water a faint luminance at night
+    color += vec3(0.012, 0.018, 0.038) * inSea * (1.0 - isDay);
+
+    // ── Eye-comfort pass ─────────────────────────────────────────────────────
+    // Dim and desaturate the terrain so it reads as backdrop, not foreground.
+    // Keeps all the dynamics visible without fighting the text you're editing.
+    color *= 0.46;
+    float colorLuma = luma(color);
+    color = mix(color, vec3(colorLuma), 0.28);   // 28% desaturation
+
+    // ── Text compositing ──────────────────────────────────────────────────────
+    // FIX: shadow is ALWAYS dark. The old code used glowCol*1.2 as shadow on dark
+    // terrain → bright offset copy of text = "doubled text" visual. Legibility on
+    // dark backgrounds is now handled by the omnidirectional glow halo instead.
+    float px = 1.0 / iResolution.x;
+    float py = 1.0 / iResolution.y;
+
+    float textVal = luma(texture2D(iChannel0, uv).rgb);
+
+    // Three-layer dark drop shadow (3px, 5px, and a slight counter-offset)
+    float shd1 = luma(texture2D(iChannel0, uv + vec2( 3.0*px, -3.0*py)).rgb);
+    float shd2 = luma(texture2D(iChannel0, uv + vec2( 5.0*px, -5.0*py)).rgb);
+    float shd3 = luma(texture2D(iChannel0, uv + vec2(-2.0*px,  2.5*py)).rgb);
+    vec3  darkShadow = vec3(0.00, 0.004, 0.012);
+    color = mix(color, darkShadow, shd1 * 0.92);
+    color = mix(color, darkShadow, shd2 * 0.60);
+    color = mix(color, darkShadow, shd3 * 0.38);
+
+    // Omnidirectional glow halo — brightens area behind text on dark terrain
+    float gR = 6.0 * px, gRy = 6.0 * py;
+    float glow = 0.0;
+    glow += luma(texture2D(iChannel0, uv+vec2(-gR,  0.0)).rgb) * 1.00;
+    glow += luma(texture2D(iChannel0, uv+vec2( gR,  0.0)).rgb) * 1.00;
+    glow += luma(texture2D(iChannel0, uv+vec2( 0.0,-gRy)).rgb) * 1.00;
+    glow += luma(texture2D(iChannel0, uv+vec2( 0.0, gRy)).rgb) * 1.00;
+    glow += luma(texture2D(iChannel0, uv+vec2(-gR, -gRy)).rgb) * 0.65;
+    glow += luma(texture2D(iChannel0, uv+vec2( gR, -gRy)).rgb) * 0.65;
+    glow += luma(texture2D(iChannel0, uv+vec2(-gR,  gRy)).rgb) * 0.65;
+    glow += luma(texture2D(iChannel0, uv+vec2( gR,  gRy)).rgb) * 0.65;
+    glow /= 5.6;
+
+    float bgLuma  = luma(color);
+    vec3  glowCol = mix(vec3(0.48,0.64,0.96), vec3(0.65,0.80,1.00), lifeProgress);
+    // Glow only on dark backgrounds (night/shadow) — no doubling artefact
+    color += glowCol * glow * smoothstep(0.50, 0.04, bgLuma) * 0.38;
+
+    // Dark underlay: dims terrain behind/near text for daytime legibility.
+    // Works regardless of background brightness — the missing piece for day scenes.
+    float underlayMask = clamp(max(glow * 1.6, textVal), 0.0, 1.0);
+    color = mix(color, color * 0.12, underlayMask * 0.72);
+
+    // Text color: ice cold → living warm
+    vec3 textDayCol   = mix(vec3(0.70,0.84,1.00), vec3(0.78,0.88,1.00), smoothstep(0.0,0.3,lifeProgress));
+    vec3 textNightCol = mix(vec3(0.75,0.88,1.00), vec3(0.90,0.85,0.72), smoothstep(0.0,0.3,lifeProgress));
+    vec3 textCol = mix(textDayCol, textNightCol, (1.0 - isDay) * 0.45);
+
+    color = mix(color, textCol, textVal * 0.95);
+
+    gl_FragColor = vec4(color, 1.0);
+}
+`;
+
+function compile(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+        console.error(gl.getShaderInfoLog(s));
+    return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
+    console.error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,1,-1,-1,1,1,-1,1,1,-1,1]), gl.STATIC_DRAW);
+const aPos = gl.getAttribLocation(prog, 'aPos');
+gl.enableVertexAttribArray(aPos);
+gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+const uRes  = gl.getUniformLocation(prog, 'iResolution');
+const uTime = gl.getUniformLocation(prog, 'iTime');
+const uCh0  = gl.getUniformLocation(prog, 'iChannel0');
+
+const tex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, tex);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+function resize() {
+    const W = window.innerWidth, H = window.innerHeight;
+    textCanvas.width  = W; textCanvas.height  = H;
+    ghostCanvas.width = W; ghostCanvas.height = H;
+    glCanvas.width    = W; glCanvas.height    = H;
+    gl.viewport(0, 0, W, H);
+    gl.uniform2f(uRes, W, H);
+}
+
+['input','keydown','keyup','click','mouseup'].forEach(ev =>
+    input.addEventListener(ev, drawText));
+
+const t0 = Date.now();
+function frame() {
+    drawText();
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, ghostCanvas);
+    gl.uniform1f(uTime, (Date.now() - t0) / 1000.0);
+    gl.uniform1i(uCh0, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    requestAnimationFrame(frame);
+}
+
+window.addEventListener('resize', resize);
+resize();
+input.focus();
+frame();
+</script>
+</body>
+</html>

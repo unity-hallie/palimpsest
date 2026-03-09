@@ -13,6 +13,8 @@
 #define SMOKE_NEON      0.8
 #define SMOKE_OPACITY   0.25
 #define VIGNETTE        0.00
+#define MOON_BRIGHTNESS 0.5
+#define MOON_SIZE       0.10
 // ─────────────────────────────────────────────────────────────────────────────
 
 float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
@@ -49,6 +51,23 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float fallB = max(dot(center, vec2(cos(baseAngle + 3.14), sin(baseAngle + 3.14))), 0.0) * edgeMask;
     vec3 neonColor = neonA * fallA + neonB * fallB;
 
+    // ── Moon with accurate phase ──────────────────────────────────────────
+    // Position: slow drift, per-terminal placement
+    float moonSeed = hash11(launchSeed * 3.91);
+    vec2 moonPos = vec2(0.15 + moonSeed * 0.7, 0.75 + moonSeed * 0.15);
+    moonPos += vec2(sin(iTime * 0.003), cos(iTime * 0.002)) * 0.02;
+
+    // Soft glowing disc with radial falloff
+    float aspect = iResolution.x / iResolution.y;
+    float moonDist = length((uv - moonPos) * vec2(aspect, 1.0));
+    float disc = smoothstep(MOON_SIZE, 0.0, moonDist); // soft radial glow
+    float core = smoothstep(MOON_SIZE * 0.5, 0.0, moonDist); // bright center
+    float moonMask = mix(disc * 0.5, 1.0, core); // halo + bright core
+
+    // Warm moonlight, hazed by smoke
+    vec3 moonColor = vec3(0.9, 0.85, 0.7) * MOON_BRIGHTNESS;
+    float moonHaze = 1.0 - density * 0.6;
+
     // ── Text dimmed by scattering ─────────────────────────────────────────
     float scatter = density * textBright;
     vec3 color = term * (1.0 - scatter * 0.4);
@@ -61,6 +80,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float h = smoothstep(0.0, 0.6, energy);
     vec3 heatTint = mix(HEAT_COLOR_LO, HEAT_COLOR_HI, h);
     smokeColor += heatTint * density * energy * HEAT_GLOW;
+
+    // ── Moon (base layer, behind smoke) ─────────────────────────────────
+    color += moonColor * moonMask * moonHaze;
 
     // ── Edge neon wash (base layer, under smoke) ────────────────────────
     color += neonColor * NEON_STRENGTH * 0.10;

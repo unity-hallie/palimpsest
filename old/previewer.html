@@ -1,0 +1,859 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Corroding Metal — Shader Previewer</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: #080604;
+  color: #c4b090;
+  font-family: "SF Mono", "Menlo", monospace;
+  font-size: 11px;
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ── Sidebar ── */
+#sidebar {
+  width: 240px;
+  flex-shrink: 0;
+  padding: 12px 10px;
+  overflow-y: auto;
+  border-right: 1px solid #1e1610;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  background: #060402;
+}
+#sidebar h1 {
+  font-size: 11px;
+  color: #d4a860;
+  margin-bottom: 6px;
+  letter-spacing: 0.5px;
+}
+.section {
+  color: #5a3a18;
+  font-size: 9px;
+  margin-top: 10px;
+  margin-bottom: 3px;
+  text-transform: uppercase;
+  letter-spacing: 1.8px;
+}
+.row { display: flex; align-items: center; gap: 5px; }
+.row label { width: 106px; color: #7a5a30; flex-shrink: 0; font-size: 10px; }
+.row input[type=range] { flex: 1; accent-color: #c87030; height: 2px; cursor: pointer; }
+.row .val { width: 38px; text-align: right; color: #d4a860; flex-shrink: 0; font-size: 10px; }
+
+#fps { color: #3a2810; font-size: 9px; margin-bottom: 4px; }
+
+button {
+  background: #120e08;
+  border: 1px solid #5a3a18;
+  color: #b09060;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 10px;
+  margin-top: 2px;
+  width: 100%;
+  text-align: left;
+}
+button:hover { background: #1e1610; border-color: #c87030; color: #d4a860; }
+button:active { background: #2a1e0c; }
+
+#exportBox {
+  display: none;
+  margin-top: 8px;
+  background: #0a0806;
+  border: 1px solid #2a1a08;
+  padding: 6px;
+  font-size: 9px;
+  color: #7a6040;
+  white-space: pre;
+  overflow-x: auto;
+  line-height: 1.5;
+}
+
+/* ── Canvas area ── */
+#canvasWrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: #040302;
+  gap: 6px;
+  position: relative;
+}
+#canvasOuter {
+  position: relative;
+  width: 700px;
+  height: 450px;
+  flex-shrink: 0;
+}
+#cv {
+  position: absolute;
+  top: 0; left: 0;
+  width: 700px;
+  height: 450px;
+  image-rendering: pixelated;
+  display: block;
+}
+
+/* ── Terminal overlay ── */
+#terminal {
+  position: absolute;
+  top: 0; left: 0;
+  width: 700px;
+  height: 450px;
+  background: transparent;
+  z-index: 10;
+  cursor: text;
+  overflow: hidden;
+  /* Catch pointer events so user can type */
+}
+#termInner {
+  position: absolute;
+  /* Positioned so typed text lands near top-left with some padding */
+  top: 18px;
+  left: 20px;
+  right: 20px;
+  bottom: 18px;
+  outline: none;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: "SF Mono", "Menlo", monospace;
+  font-size: 15px;
+  line-height: 1.45;
+  color: rgba(255, 220, 140, 0.0); /* invisible — rendered into sim */
+  caret-color: rgba(255, 200, 80, 0.92);
+  /* Semi-transparent terminal feel */
+  background: transparent;
+  pointer-events: auto;
+  /* Slight text shadow for glow feel when text is visible at all */
+  text-shadow: 0 0 8px rgba(255, 180, 60, 0.4);
+  /* No selection highlight bleed */
+  -webkit-user-select: text;
+  user-select: text;
+}
+/* Make selection look good */
+#termInner::selection { background: rgba(200, 120, 30, 0.3); }
+
+/* Cursor blink */
+@keyframes blink { 0%,49%{opacity:1} 50%,100%{opacity:0} }
+#termCursor {
+  display: inline-block;
+  width: 2px;
+  height: 1.1em;
+  background: rgba(255, 200, 80, 0.9);
+  vertical-align: text-bottom;
+  animation: blink 1s step-start infinite;
+  margin-left: 1px;
+  box-shadow: 0 0 6px rgba(255, 180, 60, 0.7);
+}
+
+/* Terminal border hint */
+#canvasOuter::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 1px solid rgba(80, 50, 20, 0.5);
+  pointer-events: none;
+  z-index: 20;
+}
+
+#fpsDisplay {
+  color: #2a1a08;
+  font-size: 9px;
+  letter-spacing: 0.5px;
+}
+</style>
+</head>
+<body>
+
+<!-- ── Sidebar ── -->
+<div id="sidebar">
+  <h1>corroding metal</h1>
+  <div id="fps">-- fps</div>
+
+  <div class="section">Eruption</div>
+  <div class="row"><label>erupt threshold</label><input type="range" id="eruptThresh" min="0.10" max="0.95" step="0.01" value="0.38"><span class="val" id="eruptThreshV">0.38</span></div>
+  <div class="row"><label>erupt strength</label><input type="range" id="eruptStr" min="0" max="2.0" step="0.01" value="1.0"><span class="val" id="eruptStrV">1.0</span></div>
+  <div class="row"><label>spark rate</label><input type="range" id="sparkRate" min="0" max="1" step="0.01" value="0.30"><span class="val" id="sparkRateV">0.30</span></div>
+
+  <div class="section">Mantle</div>
+  <div class="row"><label>mantle brightness</label><input type="range" id="mantleBright" min="0.2" max="2.0" step="0.02" value="0.90"><span class="val" id="mantleBrightV">0.90</span></div>
+  <div class="row"><label>mantle hotness</label><input type="range" id="mantleHot" min="0" max="1" step="0.01" value="0.65"><span class="val" id="mantleHotV">0.65</span></div>
+
+  <div class="section">Crust</div>
+  <div class="row"><label>grow rate</label><input type="range" id="crustGrow" min="0" max="0.04" step="0.0002" value="0.007"><span class="val" id="crustGrowV">0.007</span></div>
+  <div class="row"><label>scour rate</label><input type="range" id="crustScour" min="0" max="0.3" step="0.002" value="0.09"><span class="val" id="crustScourV">0.09</span></div>
+  <div class="row"><label>text burn</label><input type="range" id="textBurn" min="0" max="0.6" step="0.005" value="0.22"><span class="val" id="textBurnV">0.22</span></div>
+
+  <div class="section">Fluid</div>
+  <div class="row"><label>advect speed</label><input type="range" id="advect" min="0.1" max="4" step="0.05" value="1.6"><span class="val" id="advectV">1.6</span></div>
+  <div class="row"><label>buoyancy</label><input type="range" id="buoyancy" min="0" max="2" step="0.02" value="0.70"><span class="val" id="buoyancyV">0.70</span></div>
+  <div class="row"><label>text stir</label><input type="range" id="textStir" min="0" max="12" step="0.1" value="6.0"><span class="val" id="textStirV">6.0</span></div>
+  <div class="row"><label>tectonic drift</label><input type="range" id="drift" min="0" max="0.6" step="0.005" value="0.20"><span class="val" id="driftV">0.20</span></div>
+
+  <div class="section">Display</div>
+  <div class="row"><label>surface dim</label><input type="range" id="surfaceDim" min="0.1" max="1.0" step="0.01" value="0.55"><span class="val" id="surfaceDimV">0.55</span></div>
+  <div class="row"><label>tarnish black</label><input type="range" id="tarnishBlack" min="0" max="1" step="0.01" value="0.60"><span class="val" id="tarnishBlackV">0.60</span></div>
+  <div class="row"><label>shadow strength</label><input type="range" id="shadowStr" min="0" max="1" step="0.01" value="0.65"><span class="val" id="shadowStrV">0.65</span></div>
+  <div class="row"><label>text min luma</label><input type="range" id="textMin" min="0.2" max="0.9" step="0.01" value="0.55"><span class="val" id="textMinV">0.55</span></div>
+  <div class="row"><label>vignette</label><input type="range" id="vig" min="0" max="1" step="0.01" value="0.50"><span class="val" id="vigV">0.50</span></div>
+
+  <div class="section">Actions</div>
+  <button id="resetBtn">Reset simulation</button>
+  <button id="pauseBtn">Pause</button>
+  <button id="heatBtn">Heat burst</button>
+  <button id="copyBtn">Copy GLSL params</button>
+  <pre id="exportBox"></pre>
+</div>
+
+<!-- ── Canvas + terminal overlay ── -->
+<div id="canvasWrap">
+  <div id="canvasOuter">
+    <canvas id="cv" width="560" height="360"></canvas>
+    <div id="terminal" title="Click to type — text appears as neon on the metal surface">
+      <div id="termInner" contenteditable="true" spellcheck="false"></div>
+    </div>
+  </div>
+  <div id="fpsDisplay">-- fps</div>
+</div>
+
+<script>
+// ── Canvas setup ──────────────────────────────────────────────────────────────
+const cv  = document.getElementById('cv');
+const W = 560, H = 360;
+cv.width = W; cv.height = H;
+cv.style.width  = '700px';
+cv.style.height = '450px';
+const ctx = cv.getContext('2d', { willReadFrequently: false });
+
+// ── State arrays ──────────────────────────────────────────────────────────────
+// 4 metals: cA=copper, cB=silver, cC=iron, cD=tin
+let cA = new Float32Array(W * H);
+let cB = new Float32Array(W * H);
+let cC = new Float32Array(W * H);
+let cD = new Float32Array(W * H);
+let crust    = new Float32Array(W * H);
+let flowE    = new Float32Array(W * H);
+let eruptAge = new Float32Array(W * H); // active eruption age (0=none, 1=fresh)
+
+let cAn    = new Float32Array(W * H);
+let cBn    = new Float32Array(W * H);
+let cCn    = new Float32Array(W * H);
+let cDn    = new Float32Array(W * H);
+let crustN = new Float32Array(W * H);
+let flowN  = new Float32Array(W * H);
+let eruptN = new Float32Array(W * H);
+
+// Text map (brightness 0-1) rasterised from the terminal each frame
+let text = new Float32Array(W * H);
+
+let frame = 0;
+
+// ── Parameters ────────────────────────────────────────────────────────────────
+const P = {
+  eruptThresh: 0.38, eruptStr: 1.0, sparkRate: 0.30,
+  mantleBright: 0.90, mantleHot: 0.65,
+  crustGrow: 0.007, crustScour: 0.09, textBurn: 0.22,
+  advect: 1.6, buoyancy: 0.70, textStir: 6.0, drift: 0.20,
+  surfaceDim: 0.55, tarnishBlack: 0.60, shadowStr: 0.65, textMin: 0.55, vig: 0.50,
+};
+
+// ── Slider wiring ─────────────────────────────────────────────────────────────
+for (const [key] of Object.entries(P)) {
+  const el  = document.getElementById(key);
+  const vel = document.getElementById(key + 'V');
+  if (!el) continue;
+  el.addEventListener('input', () => {
+    P[key] = parseFloat(el.value);
+    if (vel) vel.textContent = parseFloat(el.value).toFixed(
+      el.step && el.step.includes('.') ? el.step.split('.')[1].length : 2
+    );
+  });
+}
+
+// ── Noise helpers ─────────────────────────────────────────────────────────────
+function hash2(x, y) {
+  let v = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+  return v - Math.floor(v);
+}
+function noise2(x, y) {
+  const ix = Math.floor(x), iy = Math.floor(y);
+  const fx = x - ix, fy = y - iy;
+  const ux = fx*fx*(3 - 2*fx), uy = fy*fy*(3 - 2*fy);
+  return (hash2(ix,   iy  )*(1-ux) + hash2(ix+1, iy  )*ux) * (1-uy)
+       + (hash2(ix,   iy+1)*(1-ux) + hash2(ix+1, iy+1)*ux) *    uy;
+}
+function fnoise(x, y) {
+  return noise2(x, y)*0.60
+       + noise2(x*2.1 + 5.2, y*2.1 + 1.3)*0.30
+       + noise2(x*4.3 + 2.7, y*4.3 + 8.1)*0.10;
+}
+function damascus(ux, uy, warp) {
+  let px = ux * 5.5, py = uy * 5.5;
+  px += Math.sin(py*3.7 + warp*6.28*0.45)*0.45;
+  py += Math.cos(px*2.9 + warp*4.71*0.45)*0.30;
+  let g = Math.sin(px*6.283)*0.5 + 0.5;
+  g = g*0.7 + (Math.sin(px*12.57 + py*3.1)*0.5 + 0.5)*0.3;
+  return g < 0.35 ? 0 : g > 0.65 ? 1 : (g - 0.35) / 0.3;
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+function init() {
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = y*W + x;
+      const ux = x/W, uy = y/H;
+      const fold = damascus(ux, uy, 0);
+      // Distribute 4 metals using fold + noise layers
+      const n1 = noise2(ux*5.1 + 0.3, uy*5.1 + 1.7);
+      const n2 = noise2(ux*3.3 + 7.1, uy*3.3 + 2.9);
+      cA[i] = fold * 0.40 + n1 * 0.08;                         // copper — folded
+      cB[i] = (1 - fold) * 0.32 + n2 * 0.07;                  // silver — counter-fold
+      cC[i] = noise2(ux*4.7 + 13.1, uy*4.7 + 5.3) * 0.28;    // iron — random blobs
+      cD[i] = noise2(ux*2.9 + 3.7, uy*2.9 + 9.1) * 0.18;     // tin — sparse
+      crust[i] = Math.min(1, 0.60 + fnoise(ux*4.8, uy*4.8)*0.38);
+      flowE[i] = 0.01;
+      eruptAge[i] = 0;
+    }
+  }
+  rasteriseText();
+}
+
+// ── Text rasterisation ────────────────────────────────────────────────────────
+// Off-screen canvas for text raster, sized to simulation resolution
+const offCV = document.createElement('canvas');
+offCV.width = W; offCV.height = H;
+const offCtx = offCV.getContext('2d');
+
+function rasteriseText() {
+  offCtx.clearRect(0, 0, W, H);
+  offCtx.fillStyle = '#000';
+  offCtx.fillRect(0, 0, W, H);
+
+  // Scale: display canvas is 700x450, sim is 560x360, ratio ~1.25
+  // Text in termInner is rendered at ~15px display = ~12px sim-space
+  const scaleX = W / 700;
+  const scaleY = H / 450;
+
+  const termEl = document.getElementById('termInner');
+  const rawText = termEl.innerText || '';
+
+  offCtx.save();
+  offCtx.scale(scaleX, scaleY);
+
+  // Match the terminal overlay positioning
+  const padLeft = 20;
+  const padTop  = 18;
+  const fontSize = 15;
+  const lineH = fontSize * 1.45;
+
+  offCtx.font = `${fontSize}px "SF Mono", "Menlo", monospace`;
+  offCtx.fillStyle = '#fff';
+  offCtx.textBaseline = 'top';
+
+  const lines = rawText.split('\n');
+  for (let li = 0; li < lines.length; li++) {
+    const ly = padTop + li * lineH;
+    if (ly > 450) break;
+    offCtx.fillText(lines[li], padLeft, ly);
+  }
+  offCtx.restore();
+
+  const img = offCtx.getImageData(0, 0, W, H);
+  for (let i = 0; i < W * H; i++) {
+    text[i] = img.data[i * 4] / 255;
+  }
+}
+
+// ── Simulation step ───────────────────────────────────────────────────────────
+function step() {
+  const t = frame * 0.025;
+  frame++;
+
+  // Rasterise text every frame (cheap, ~1ms)
+  rasteriseText();
+
+  // Occasional random spark — lower threshold seeds eruptions autonomously
+  if (Math.random() < P.sparkRate * 0.004) {
+    const sx = Math.floor(Math.random() * W);
+    const sy = Math.floor(Math.random() * H);
+    const sr = 2 + Math.floor(Math.random() * 4);
+    for (let dy = -sr; dy <= sr; dy++) {
+      for (let dx = -sr; dx <= sr; dx++) {
+        if (dx*dx + dy*dy > sr*sr) continue;
+        const nx = sx+dx, ny = sy+dy;
+        if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+        flowE[ny*W + nx] = Math.min(1, flowE[ny*W + nx] + 0.85);
+      }
+    }
+  }
+
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = y*W + x;
+      const ux = x/W, uy = y/H;
+
+      const myCA = cA[i], myCB = cB[i], myCC = cC[i], myCD = cD[i];
+      const myCrust = crust[i];
+      const myFlow  = flowE[i];
+      const myErupt = eruptAge[i];
+      const txt = text[i];
+
+      // Neighbour indices (clamped)
+      const iN = Math.max(0,    y-1)*W + x;
+      const iS = Math.min(H-1, y+1)*W + x;
+      const iE = y*W + Math.min(W-1, x+1);
+      const iW = y*W + Math.max(0,   x-1);
+
+      // Total concentration (sum of all metals at this pixel)
+      const totNbr = (cA[iN]+cB[iN]+cC[iN]+cD[iN])
+                   - (cA[iS]+cB[iS]+cC[iS]+cD[iS]);
+      const totNbrX= (cA[iE]+cB[iE]+cC[iE]+cD[iE])
+                   - (cA[iW]+cB[iW]+cC[iW]+cD[iW]);
+
+      // Buoyancy from alloy gradient
+      let vx = -totNbr * P.buoyancy / H;
+      let vy =  totNbrX * P.buoyancy / W;
+
+      // Crust damps flow
+      const crustDamp = 1 - myCrust * 0.72;
+      vx *= crustDamp; vy *= crustDamp;
+
+      // Text stir — text pixels have 3x stronger buoyancy contribution
+      const txN = text[iN], txS = text[iS], txE = text[iE], txW = text[iW];
+      const textBoost = 1.0 + txt * 2.0; // 1x baseline, 3x at full text pixel
+      vx += (txE - txW) * P.textStir * textBoost / W;
+      vy += (txN - txS) * P.textStir * textBoost / H;
+
+      // Tectonic drift
+      vx += Math.sin(t + uy*1.7) * Math.cos(t*0.6 + ux*2.3) * P.drift / W;
+      vy += Math.cos(t*0.8 + uy*2.1) * Math.sin(t*0.5 + ux*1.4) * P.drift / H;
+
+      // Eruption injects velocity outward from center of erupting zone
+      if (myErupt > 0.01) {
+        const eruptBoost = myErupt * 0.8;
+        vx += Math.cos(frame * 0.3 + ux * 8.0) * eruptBoost / W;
+        vy += Math.sin(frame * 0.3 + uy * 8.0) * eruptBoost / H;
+      }
+
+      const velMag = Math.sqrt(vx*vx + vy*vy);
+
+      // Semi-Lagrangian advect
+      const srcX = Math.max(0, Math.min(W-1, x - vx * P.advect * W));
+      const srcY = Math.max(0, Math.min(H-1, y - vy * P.advect * H));
+      const sx0 = Math.floor(srcX), sy0 = Math.floor(srcY);
+      const sx1 = Math.min(W-1, sx0+1), sy1 = Math.min(H-1, sy0+1);
+      const fx2 = srcX - sx0, fy2 = srcY - sy0;
+      function bilin(arr) {
+        return arr[sy0*W+sx0]*(1-fx2)*(1-fy2) + arr[sy0*W+sx1]*fx2*(1-fy2)
+             + arr[sy1*W+sx0]*(1-fx2)*fy2     + arr[sy1*W+sx1]*fx2*fy2;
+      }
+      const adCA    = bilin(cA);
+      const adCB    = bilin(cB);
+      const adCC    = bilin(cC);
+      const adCD    = bilin(cD);
+      const adCrust = bilin(crust);
+      const adFlow  = bilin(flowE);
+
+      // Alloy diffusion (each metal mixes with neighbour average)
+      const nbA = (cA[iN]+cA[iS]+cA[iE]+cA[iW])*0.25;
+      const nbB = (cB[iN]+cB[iS]+cB[iE]+cB[iW])*0.25;
+      const nbC = (cC[iN]+cC[iS]+cC[iE]+cC[iW])*0.25;
+      const nbD = (cD[iN]+cD[iS]+cD[iE]+cD[iW])*0.25;
+
+      // Text deposits copper, erodes silver slightly, leaves iron/tin alone
+      const newCA = Math.max(0, Math.min(1, adCA*0.91 + nbA*0.09 + txt*0.08));
+      const newCB = Math.max(0, Math.min(1, adCB*0.91 + nbB*0.09 - txt*0.02));
+      const newCC = Math.max(0, Math.min(1, adCC*0.91 + nbC*0.09));
+      const newCD = Math.max(0, Math.min(1, adCD*0.91 + nbD*0.09));
+
+      // Flow energy
+      const velPx  = velMag * W;
+      let newFlow  = Math.max(adFlow * 0.88, velPx * 0.014);
+      newFlow = Math.max(newFlow, txt * 0.95);
+
+      // Eruption heat from neighbours spreads via seep
+      const eruptNbrAvg = (eruptAge[iN]+eruptAge[iS]+eruptAge[iE]+eruptAge[iW])*0.25;
+      newFlow = Math.min(1, newFlow + eruptNbrAvg * 0.35);
+
+      // Mantle upwelling noise
+      const mNoise = fnoise(ux*W*0.010 + t*0.025, uy*H*0.010 + t*0.017);
+      const heatPressure = newFlow * (0.6 + mNoise*0.4);
+
+      // --- Eruption system ---
+      // Lower threshold (P.eruptThresh). If pressure exceeds threshold, start eruption.
+      const upwelling = Math.max(0, (heatPressure - P.eruptThresh) / (1.0 - P.eruptThresh)) * (1 - txt);
+      let newErupt = eruptAge[i] * 0.980; // slow decay per frame
+
+      if (upwelling > 0.55 && myErupt < 0.1) {
+        // Ignite eruption
+        newErupt = 1.0;
+      }
+      if (myErupt > 0.05) {
+        // Active eruption: aggressively scour crust and boost neighbours
+        newFlow = Math.min(1, newFlow + myErupt * 0.5);
+      }
+
+      // Crust dynamics
+      const shear = Math.max(
+        Math.hypot(cA[iN]+cC[iN] - (cA[iS]+cC[iS]), cB[iN]+cD[iN] - (cB[iS]+cD[iS])),
+        Math.hypot(cA[iE]+cC[iE] - (cA[iW]+cC[iW]), cB[iE]+cD[iE] - (cB[iW]+cD[iW]))
+      );
+      const fracture = Math.max(0, Math.min(1, (shear - 0.06)/0.12))
+                     * Math.max(0, Math.min(1, (myCrust - 0.35)/0.30));
+
+      // Eruptions scour crust aggressively
+      const eruptScour = myErupt * 0.25;
+
+      let newCrust = adCrust
+        + P.crustGrow  * (1 - newFlow) * (1 - txt)
+        - P.crustScour * newFlow * 0.08
+        - txt * P.textBurn
+        - fracture * 0.06
+        - upwelling * 0.15
+        - eruptScour;
+      newCrust = Math.max(0, Math.min(1, newCrust));
+
+      cAn[i]    = newCA;
+      cBn[i]    = newCB;
+      cCn[i]    = newCC;
+      cDn[i]    = newCD;
+      crustN[i] = newCrust;
+      flowN[i]  = Math.max(0, Math.min(1, newFlow));
+      eruptN[i] = Math.max(0, Math.min(1, newErupt));
+    }
+  }
+
+  // Swap buffers
+  [cA, cAn]         = [cAn, cA];
+  [cB, cBn]         = [cBn, cB];
+  [cC, cCn]         = [cCn, cC];
+  [cD, cDn]         = [cDn, cD];
+  [crust,  crustN]  = [crustN,  crust];
+  [flowE,  flowN]   = [flowN,   flowE];
+  [eruptAge, eruptN]= [eruptN,  eruptAge];
+}
+
+// ── Render ────────────────────────────────────────────────────────────────────
+const imageData = ctx.createImageData(W, H);
+const px = imageData.data;
+
+function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+function mix(a, b, t) { return a + (b - a)*t; }
+function smoothstep(e0, e1, x) {
+  const t = clamp01((x - e0) / (e1 - e0));
+  return t*t*(3 - 2*t);
+}
+
+function render() {
+  const t = frame * 0.025;
+
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = y*W + x;
+      const ux = x/W, uy = y/H;
+
+      const myCA = cA[i], myCB = cB[i], myCC = cC[i], myCD = cD[i];
+      const myCrust = crust[i];
+      const myFlow  = flowE[i];
+      const myErupt = eruptAge[i];
+      const txt = text[i];
+
+      const totalConc = myCA + myCB + myCC + myCD;
+      const fracA = totalConc > 0.01 ? myCA/totalConc : 0.25;
+      const fracB = totalConc > 0.01 ? myCB/totalConc : 0.25;
+      const fracC = totalConc > 0.01 ? myCC/totalConc : 0.25;
+      // fracD implicit
+
+      const fold = damascus(ux, uy, totalConc*0.4 + myCrust*0.25);
+
+      // ── Mantle colour ──
+      const mNoise = fnoise(ux*W*0.010 + t*0.025, uy*H*0.010 + t*0.017);
+      const heatPressure = myFlow * (0.6 + mNoise*0.4);
+      const upwelling = clamp01((heatPressure - P.eruptThresh) / (1.0 - P.eruptThresh)) * (1 - txt);
+
+      const mHot  = [0.62, 0.32, 0.07];
+      const mCool = [0.40, 0.30, 0.13];
+      const mf = clamp01(fracA*0.5 + fracC*0.2 + mNoise*0.3 * P.mantleHot);
+      const mMod = P.mantleBright * (0.70 + mNoise*0.40);
+      let mantleR = mix(mCool[0], mHot[0], mf) * mMod;
+      let mantleG = mix(mCool[1], mHot[1], mf) * mMod;
+      let mantleB = mix(mCool[2], mHot[2], mf) * mMod;
+
+      // Active eruption: molten bright orange-white core
+      if (myErupt > 0.05) {
+        const ef = smoothstep(0.05, 0.7, myErupt);
+        mantleR = mix(mantleR, 1.0,  ef * 0.95);
+        mantleG = mix(mantleG, 0.65, ef * 0.85);
+        mantleB = mix(mantleB, 0.10, ef * 0.70);
+      }
+
+      // ── Surface metal colour: mix of 4 metal tints ──
+      // copper: warm orange-brown
+      const copR=0.84, copG=0.47, copB=0.14;
+      // silver: cool blue-white
+      const silR=0.72, silG=0.75, silB=0.82;
+      // iron: muted blue-grey
+      const iroR=0.46, iroG=0.44, iroB=0.42;
+      // tin: pale silver-white
+      const tinR=0.78, tinG=0.80, tinB=0.82;
+
+      // Weighted mix by fraction
+      const allR = copR*fracA + silR*fracB + iroR*fracC + tinR*(1-fracA-fracB-fracC);
+      const allG = copG*fracA + silG*fracB + iroG*fracC + tinG*(1-fracA-fracB-fracC);
+      const allB = copB*fracA + silB*fracB + iroB*fracC + tinB*(1-fracA-fracB-fracC);
+
+      const darkR=0.11, darkG=0.09, darkB=0.07;
+      const brightR=0.54, brightG=0.47, brightB=0.35;
+      let metR = mix(darkR, brightR, fold);
+      let metG = mix(darkG, brightG, fold);
+      let metB = mix(darkB, brightB, fold);
+      const alloyT = smoothstep(0.04, 0.55, totalConc);
+      metR = mix(metR, allR, alloyT);
+      metG = mix(metG, allG, alloyT);
+      metB = mix(metB, allB, alloyT);
+
+      // Gloss
+      const gloss = (1 - myCrust) * smoothstep(0, 0.25, myFlow);
+      const gf = 0.20 * gloss * (fold*0.5 + 0.5);
+      metR += gf*1.2; metG += gf*0.9; metB += gf*0.6;
+
+      // Micro-texture
+      const micro = fnoise(ux*W*0.022, uy*H*0.022);
+      const mf2 = 0.88 + micro * 0.22;
+      metR *= mf2; metG *= mf2; metB *= mf2;
+
+      // ── Fracture lines ──
+      const iN2 = Math.max(0,    y-1)*W + x;
+      const iS2 = Math.min(H-1, y+1)*W + x;
+      const iE2 = y*W + Math.min(W-1, x+1);
+      const iW2 = y*W + Math.max(0,   x-1);
+      const shear = Math.max(
+        Math.hypot(cA[iN2]+cC[iN2] - (cA[iS2]+cC[iS2]), cB[iN2]+cD[iN2] - (cB[iS2]+cD[iS2])),
+        Math.hypot(cA[iE2]+cC[iE2] - (cA[iW2]+cC[iW2]), cB[iE2]+cD[iE2] - (cB[iW2]+cD[iW2]))
+      );
+      const fracture = smoothstep(0.06, 0.18, shear) * smoothstep(0.35, 0.65, myCrust);
+      const ff = fracture * (1 - txt) * 0.7;
+      metR = mix(metR, metR*1.7 + 0.08, ff);
+      metG = mix(metG, metG*1.7 + 0.05, ff);
+      metB = mix(metB, metB*1.7 + 0.02, ff);
+
+      // ── Tarnish: 4 different oxidation colours ──
+      const tTex = fnoise(ux*W*0.014 + 37.1, uy*H*0.014 + 91.3);
+      const edgeSat = smoothstep(0.5, 0.1, myCrust) + fracture*0.5;
+
+      // copper→verdigris (blue-green)
+      const vrdR=0.10, vrdG=0.38, vrdB=0.28;
+      // silver→sulfide (yellow-black)
+      const sulR=0.22, sulG=0.18, sulB=0.05;
+      // iron→rust (red-brown)
+      const rustR=0.38, rustG=0.15, rustB=0.04;
+      // tin→white oxide (grey-white)
+      const tinOxR=0.62, tinOxG=0.64, tinOxB=0.65;
+
+      // Each metal's tarnish colour weighted by fraction
+      const tarBaseR = vrdR*fracA + sulR*fracB + rustR*fracC + tinOxR*(1-fracA-fracB-fracC);
+      const tarBaseG = vrdG*fracA + sulG*fracB + rustG*fracC + tinOxG*(1-fracA-fracB-fracC);
+      const tarBaseB = vrdB*fracA + sulB*fracB + rustB*fracC + tinOxB*(1-fracA-fracB-fracC);
+
+      const tarHintT = 0.30 + edgeSat*0.60;
+      const tMod = P.tarnishBlack + mix(tTex, 1-fold, 0.55)*(1 - P.tarnishBlack)*0.85;
+      let tarR = mix(0.030, tarBaseR, tarHintT) * tMod;
+      let tarG = mix(0.025, tarBaseG, tarHintT) * tMod;
+      let tarB = mix(0.020, tarBaseB, tarHintT) * tMod;
+
+      const tarnishAmt = myCrust * mix(0.5, 1.0, 1 - fold*0.4);
+      let surR = mix(metR, tarR, tarnishAmt);
+      let surG = mix(metG, tarG, tarnishAmt);
+      let surB = mix(metB, tarB, tarnishAmt);
+
+      // Mantle bleeds through
+      const mantleVis = Math.max(upwelling, fracture*0.35) * P.eruptStr;
+      surR = mix(surR, mantleR, mantleVis);
+      surG = mix(surG, mantleG, mantleVis);
+      surB = mix(surB, mantleB, mantleVis);
+
+      // Active eruption colour bleeds aggressively
+      if (myErupt > 0.05) {
+        const ef = smoothstep(0.05, 0.8, myErupt) * P.eruptStr;
+        surR = mix(surR, mantleR, ef * 0.75);
+        surG = mix(surG, mantleG, ef * 0.75);
+        surB = mix(surB, mantleB, ef * 0.75);
+      }
+
+      // Surface dim
+      surR *= P.surfaceDim; surG *= P.surfaceDim; surB *= P.surfaceDim;
+
+      // ── Text shadow ──
+      const h1 = text[Math.max(0,    y-2)*W + x];
+      const h2 = text[Math.min(H-1, y+2)*W + x];
+      const h3 = text[y*W + Math.min(W-1, x+2)];
+      const h4 = text[y*W + Math.max(0,   x-2)];
+      const nearTxt = smoothstep(0.08, 0.38, Math.max(Math.max(h1,h2), Math.max(h3,h4)));
+      const h5 = text[Math.max(0,    y-5)*W + x];
+      const h6 = text[Math.min(H-1, y+5)*W + x];
+      const h7 = text[y*W + Math.min(W-1, x+5)];
+      const h8 = text[y*W + Math.max(0,   x-5)];
+      const farTxt = smoothstep(0.08, 0.38, Math.max(Math.max(h5,h6), Math.max(h7,h8)));
+      const shadow = (nearTxt*0.75 + farTxt*0.25) * (1 - txt) * P.shadowStr;
+      surR *= (1 - shadow); surG *= (1 - shadow); surB *= (1 - shadow);
+
+      // ── Neon text glow — warm golden tint ──
+      let glowR = txt*1.45 + 0.06;
+      let glowG = txt*1.10 + 0.03;
+      let glowB = txt*0.55;
+      const gLuma = 0.299*glowR + 0.587*glowG + 0.114*glowB;
+      if (gLuma < P.textMin && gLuma > 0.001) {
+        const boost = P.textMin / gLuma;
+        glowR *= boost; glowG *= boost; glowB *= boost;
+      }
+      glowR = clamp01(glowR); glowG = clamp01(glowG); glowB = clamp01(glowB);
+
+      let r = mix(surR, glowR, txt);
+      let g = mix(surG, glowG, txt);
+      let b = mix(surB, glowB, txt);
+
+      // ── Vignette ──
+      const vdx = ux - 0.5, vdy = (uy - 0.5) * 0.85;
+      const vigAmt = 1 - P.vig * Math.pow(Math.sqrt(vdx*vdx*1.15 + vdy*vdy), 2) * 2.1;
+      r *= vigAmt; g *= vigAmt; b *= vigAmt;
+
+      const pi = i * 4;
+      px[pi]   = clamp01(r) * 255;
+      px[pi+1] = clamp01(g) * 255;
+      px[pi+2] = clamp01(b) * 255;
+      px[pi+3] = 255;
+    }
+  }
+  ctx.putImageData(imageData, 0, 0);
+}
+
+// ── Terminal overlay: focus / input handling ──────────────────────────────────
+const termEl = document.getElementById('termInner');
+
+// Focus terminal on click anywhere in canvas area
+document.getElementById('terminal').addEventListener('click', () => {
+  termEl.focus();
+});
+document.getElementById('canvasOuter').addEventListener('click', () => {
+  termEl.focus();
+});
+
+// Prevent default tab / certain keys that would break contenteditable
+termEl.addEventListener('keydown', e => {
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    document.execCommand('insertText', false, '    ');
+  }
+  // Suppress cmd/ctrl+b, i, u (bold/italic/underline) that contenteditable usually handles
+  if ((e.ctrlKey || e.metaKey) && ['b','i','u'].includes(e.key.toLowerCase())) {
+    e.preventDefault();
+  }
+});
+
+// Prevent paste bringing in rich HTML
+termEl.addEventListener('paste', e => {
+  e.preventDefault();
+  const plain = e.clipboardData.getData('text/plain');
+  document.execCommand('insertText', false, plain);
+});
+
+// ── Controls ──────────────────────────────────────────────────────────────────
+document.getElementById('resetBtn').addEventListener('click', () => {
+  frame = 0; init();
+});
+
+let paused = false;
+document.getElementById('pauseBtn').addEventListener('click', () => {
+  paused = !paused;
+  document.getElementById('pauseBtn').textContent = paused ? 'Resume' : 'Pause';
+});
+
+document.getElementById('heatBtn').addEventListener('click', () => {
+  const x = Math.floor(Math.random() * W);
+  const y = Math.floor(Math.random() * H);
+  for (let dy = -25; dy <= 25; dy++) {
+    for (let dx = -25; dx <= 25; dx++) {
+      const d = Math.sqrt(dx*dx + dy*dy);
+      if (d > 25) continue;
+      const nx = x+dx, ny = y+dy;
+      if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+      const amt = (1 - d/25) * 0.98;
+      flowE[ny*W + nx] = Math.min(1, flowE[ny*W + nx] + amt);
+      crust[ny*W + nx] = Math.max(0, crust[ny*W + nx] - amt*0.5);
+    }
+  }
+});
+
+document.getElementById('copyBtn').addEventListener('click', () => {
+  const box = document.getElementById('exportBox');
+  const glsl = `// -- GLSL Params (corroding metal, 4-metal) --
+const float ADVECT_SPEED   = ${P.advect.toFixed(2)};
+const float BUOYANCY       = ${P.buoyancy.toFixed(3)};
+const float TEXT_STIR      = ${P.textStir.toFixed(1)};
+const float TEXT_BOOST     = 3.0;    // text px buoyancy multiplier
+const float TECTONIC_DRIFT = ${P.drift.toFixed(3)};
+const float CRUST_GROW     = ${P.crustGrow.toFixed(4)};
+const float CRUST_SCOUR    = ${P.crustScour.toFixed(3)};
+const float TEXT_BURN      = ${P.textBurn.toFixed(3)};
+const float FLOW_DECAY     = 0.88;
+const float ALLOY_DIFFUSE  = 0.09;
+const float ERUPT_THRESH   = ${P.eruptThresh.toFixed(2)};
+const float ERUPT_STR      = ${P.eruptStr.toFixed(2)};
+const float ERUPT_DECAY    = 0.980;
+const float SPARK_RATE     = ${P.sparkRate.toFixed(2)};
+const float MANTLE_BRIGHT  = ${P.mantleBright.toFixed(2)};
+const float MANTLE_HOT     = ${P.mantleHot.toFixed(2)};
+const float SURFACE_DIM    = ${P.surfaceDim.toFixed(2)};
+const float TARNISH_BLACK  = ${P.tarnishBlack.toFixed(2)};
+const float SHADOW_STR     = ${P.shadowStr.toFixed(2)};
+const float TEXT_MIN_LUMA  = ${P.textMin.toFixed(2)};
+const float VIGNETTE       = ${P.vig.toFixed(2)};
+// Tarnish colours:
+// copper  -> verdigris  rgb(0.10, 0.38, 0.28)
+// silver  -> sulfide    rgb(0.22, 0.18, 0.05)
+// iron    -> rust       rgb(0.38, 0.15, 0.04)
+// tin     -> white-ox   rgb(0.62, 0.64, 0.65)`;
+
+  box.textContent = glsl;
+  box.style.display = box.style.display === 'none' ? 'block' : 'none';
+
+  // Copy to clipboard
+  navigator.clipboard.writeText(glsl).catch(() => {});
+});
+
+// ── Animation loop ─────────────────────────────────────────────────────────────
+let lastTime = performance.now(), frameCount = 0;
+const fpsEl  = document.getElementById('fps');
+const fpsEl2 = document.getElementById('fpsDisplay');
+
+function loop() {
+  if (!paused) {
+    step();
+    render();
+    frameCount++;
+    const now = performance.now();
+    if (now - lastTime > 700) {
+      const fps = Math.round(frameCount / (now - lastTime) * 1000);
+      fpsEl.textContent  = fps + ' fps';
+      fpsEl2.textContent = fps + ' fps';
+      frameCount = 0;
+      lastTime = now;
+    }
+  }
+  requestAnimationFrame(loop);
+}
+
+init();
+termEl.focus();
+loop();
+</script>
+</body>
+</html>

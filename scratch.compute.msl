@@ -1,0 +1,35 @@
+// scratch.compute.msl — live editing scratchpad (compute kernel)
+// State texture (rgba16f):
+//   R, G, B, A = whatever you need
+//
+// Texture bindings:
+//   t0 = iChannel0 (terminal)
+//   t2 = iChannel1 (display feedback)
+//   t3 = state_read
+//   t8 = state_write
+
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void computeMain(
+    texture2d<float, access::sample> terminal    [[ texture(0) ]],
+    texture2d<float, access::sample> feedback    [[ texture(2) ]],
+    texture2d<float, access::sample> state_read  [[ texture(3) ]],
+    texture2d<float, access::write>  state_write [[ texture(8) ]],
+    uint2                            gid         [[ thread_position_in_grid ]]
+) {
+    uint W = state_write.get_width();
+    uint H = state_write.get_height();
+    if (gid.x >= W || gid.y >= H) return;
+
+    constexpr sampler smp(filter::linear, address::clamp_to_edge);
+    float2 uv = (float2(gid) + 0.5) / float2(W, H);
+    // float2 px = 1.0 / float2(W, H);
+
+    float4 prev = state_read.sample(smp, uv);
+
+    // ── your experiment here ─────────────────────────────────────────
+
+
+    state_write.write(prev, gid);
+}

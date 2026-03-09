@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Inhabited — shader preview</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; width: 100vw; height: 100vh; overflow: hidden; }
+#container { position: relative; width: 100vw; height: 100vh; cursor: text; }
+#glcanvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+#input {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    opacity: 0;
+    cursor: text;
+    z-index: 10;
+    resize: none;
+    font-size: 15px;
+    line-height: 22px;
+    font-family: monospace;
+    background: transparent;
+    color: transparent;
+    caret-color: transparent;
+    border: none;
+    outline: none;
+    padding: 16px;
+}
+#hint {
+    position: absolute;
+    bottom: 14px; right: 18px;
+    color: rgba(255,255,255,0.18);
+    font: 11px/1.4 monospace;
+    pointer-events: none;
+    z-index: 20;
+    text-align: right;
+}
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="glcanvas"></canvas>
+  <textarea id="input" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
+  <div id="hint">inhabited.glsl · click to type</div>
+</div>
+
+<script>
+// ─────────────────────────────────────────────
+//  Text canvas  (source texture for the shader)
+// ─────────────────────────────────────────────
+const textCanvas = document.createElement('canvas');
+const tx = textCanvas.getContext('2d');
+
+const FONT_SIZE   = 15;
+const LINE_HEIGHT = 22;
+const PAD         = 16;
+const FONT        = `${FONT_SIZE}px "JetBrains Mono","Fira Code","Cascadia Code","Consolas",monospace`;
+
+// Measure char width once
+tx.font = FONT;
+const CHAR_W = tx.measureText('M').width;
+
+const DEMO = `  ██  inhabited  ██
+  city simulation from terminal text
+
+  the text is the city.
+  characters are buildings.
+  dark space is streets and sky.
+  density is neighborhood.
+  you are looking down, at night.
+
+  $ ls -la /usr/local/lib
+  drwxr-xr-x  142  root  4096  .
+  drwxr-xr-x   14  root  4096  ..
+  drwxr-xr-x    8  root  4096  node_modules
+  -rw-r--r--    1  root  2048  package.json
+  -rw-r--r--    1  root  8832  package-lock.json
+  drwxr-xr-x    3  root  4096  python3.11
+  drwxr-xr-x    2  root  4096  dist-packages
+
+  function inhabited(text) {
+    const density = measure(neighborhood(text));
+    const flow    = noise(cityScale) * density;
+    const heat    = district * pulse;
+    const bleed   = light.upward(buildings);
+    return render({ heat, bleed, flow });
+  }
+
+  type freely to build the city.
+  denser text → busier district.
+  blank lines → streets.
+`;
+
+const input = document.getElementById('input');
+input.value = DEMO;
+
+// ─────────────────────────────────────────────
+//  Draw text to offscreen canvas
+// ─────────────────────────────────────────────
+function drawText() {
+    const W = textCanvas.width;
+    const H = textCanvas.height;
+
+    tx.fillStyle = '#070710';
+    tx.fillRect(0, 0, W, H);
+    tx.font = FONT;
+
+    const cols    = Math.floor((W - PAD * 2) / CHAR_W);
+    const rawText = input.value;
+    const lines   = rawText.split('\n');
+
+    // Locate cursor in line/col space
+    const sel = input.selectionStart;
+    let cursorLine = 0, cursorCol = 0, counted = 0;
+    for (let li = 0; li < lines.length; li++) {
+        if (counted + lines[li].length >= sel) {
+            cursorLine = li;
+            cursorCol  = sel - counted;
+            break;
+        }
+        counted += lines[li].length + 1;
+    }
+
+    const focused = document.activeElement === input;
+    const blink   = Math.floor(Date.now() / 530) % 2 === 0;
+
+    let y = PAD + FONT_SIZE;
+    for (let li = 0; li < lines.length; li++) {
+        let line = lines[li];
+        let col  = 0;
+
+        while (line.length > cols) {
+            tx.fillStyle = '#ccc8b4';
+            tx.fillText(line.slice(0, cols), PAD, y);
+            line = line.slice(cols);
+            col += cols;
+            y   += LINE_HEIGHT;
+        }
+
+        tx.fillStyle = '#ccc8b4';
+        tx.fillText(line, PAD, y);
+
+        // Cursor block
+        if (li === cursorLine && focused && blink) {
+            const cx = PAD + cursorCol * CHAR_W;
+            tx.fillStyle = 'rgba(210,205,180,0.85)';
+            tx.fillRect(cx, y - FONT_SIZE + 2, Math.max(CHAR_W * 0.7, 2), LINE_HEIGHT - 3);
+            tx.fillStyle = '#070710';
+            const ch = line[cursorCol - col] || '';
+            if (ch) tx.fillText(ch, cx, y);
+        }
+
+        y += LINE_HEIGHT;
+    }
+}
+
+// ─────────────────────────────────────────────
+//  WebGL setup
+// ─────────────────────────────────────────────
+const glCanvas = document.getElementById('glcanvas');
+const gl = glCanvas.getContext('webgl') || glCanvas.getContext('experimental-webgl');
+
+if (!gl) {
+    document.body.innerHTML = '<p style="color:#f88;font-family:monospace;padding:32px">WebGL not available</p>';
+}
+
+const VS = `
+attribute vec2 aPos;
+void main() { gl_Position = vec4(aPos, 0.0, 1.0); }
+`;
+
+const FS = `
+precision mediump float;
+uniform sampler2D iChannel0;
+uniform vec2      iResolution;
+uniform float     iTime;
+
+#define DISTRICT_RADIUS  0.07
+#define BLEED_HEIGHT     0.022
+#define HEAT_STRENGTH    0.14
+#define STREET_COOL      0.35
+#define PULSE_SPEED      0.6
+#define FLOW_SPEED       0.12
+#define WINDOW_RATE      2.5
+
+float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+
+float hash21(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+float noise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(
+        mix(hash21(i),               hash21(i + vec2(1.0,0.0)), f.x),
+        mix(hash21(i + vec2(0.0,1.0)), hash21(i + vec2(1.0,1.0)), f.x),
+        f.y
+    );
+}
+
+void main() {
+    vec2  uv  = gl_FragCoord.xy / iResolution.xy;
+    float t   = iTime;
+
+    vec4  terminal   = texture2D(iChannel0, uv);
+    float brightness = luma(terminal.rgb);
+
+    // ── District: neighborhood density ──────────────────────────
+    float r = DISTRICT_RADIUS;
+    float district = 0.0;
+    district += luma(texture2D(iChannel0, uv + vec2(-r,  0.0)).rgb);
+    district += luma(texture2D(iChannel0, uv + vec2( r,  0.0)).rgb);
+    district += luma(texture2D(iChannel0, uv + vec2( 0.0,-r )).rgb);
+    district += luma(texture2D(iChannel0, uv + vec2( 0.0, r )).rgb);
+    district += luma(texture2D(iChannel0, uv + vec2(-r,  -r ) * 0.707).rgb);
+    district += luma(texture2D(iChannel0, uv + vec2( r,  -r ) * 0.707).rgb);
+    district += luma(texture2D(iChannel0, uv + vec2(-r,   r ) * 0.707).rgb);
+    district += luma(texture2D(iChannel0, uv + vec2( r,   r ) * 0.707).rgb);
+    district /= 8.0;
+
+    // ── Upward light bleed ───────────────────────────────────────
+    // Sample below → light climbs upward out of buildings
+    float bh    = BLEED_HEIGHT;
+    float bleed = 0.0;
+    bleed += luma(texture2D(iChannel0, uv + vec2(0.0, -bh * 0.2)).rgb) * 0.833;
+    bleed += luma(texture2D(iChannel0, uv + vec2(0.0, -bh * 0.4)).rgb) * 0.667;
+    bleed += luma(texture2D(iChannel0, uv + vec2(0.0, -bh * 0.6)).rgb) * 0.500;
+    bleed += luma(texture2D(iChannel0, uv + vec2(0.0, -bh * 0.8)).rgb) * 0.333;
+    bleed += luma(texture2D(iChannel0, uv + vec2(0.0, -bh * 1.0)).rgb) * 0.167;
+    bleed /= 5.0;
+
+    // ── Traffic flow field ───────────────────────────────────────
+    float flow_t  = t * FLOW_SPEED;
+    vec2  city_uv = uv * vec2(14.0, 7.0);
+    float flow    = noise(city_uv + vec2( flow_t * 0.8,  flow_t * 0.3));
+    flow         += noise(city_uv * 1.8 + vec2(-flow_t * 0.5, flow_t * 0.7)) * 0.5;
+    flow         /= 1.5;
+    float traffic = flow * district * 0.06;
+
+    // ── District pulse ───────────────────────────────────────────
+    float phase   = uv.x * 4.2 + uv.y * 2.8;
+    float pulse_a = sin(t * PULSE_SPEED       + phase      ) * 0.5 + 0.5;
+    float pulse_b = sin(t * PULSE_SPEED * 1.6 - phase * 0.7 + 1.2) * 0.5 + 0.5;
+    float pulse   = sqrt(pulse_a * pulse_b);
+
+    // ── Window flicker ───────────────────────────────────────────
+    float char_x      = floor(gl_FragCoord.x / 8.0);
+    float char_y      = floor(gl_FragCoord.y / 16.0);
+    float win_phase   = hash21(vec2(char_x, char_y));
+    float flicker     = step(0.5, fract(win_phase + t * WINDOW_RATE * (0.5 + win_phase)));
+    flicker           = mix(0.85, 1.0, flicker);
+
+    // ── Compose ──────────────────────────────────────────────────
+    vec3 color = terminal.rgb;
+
+    // Windows dim independently
+    color *= mix(1.0, flicker, brightness * 0.3);
+
+    // Streets shift cool (night sky between towers)
+    float openness = 1.0 - brightness;
+    color.b += openness * STREET_COOL * 0.08;
+    color.r -= openness * STREET_COOL * 0.02;
+    color.g -= openness * STREET_COOL * 0.01;
+
+    // Warm light climbing upward from buildings
+    float bleed_c = bleed * (1.0 - brightness * 0.5);
+    color.r += bleed_c * 0.35;
+    color.g += bleed_c * 0.18;
+    color.b += bleed_c * 0.02;
+
+    // District heat: busy neighborhoods breathe warm
+    float heat  = district * pulse * HEAT_STRENGTH;
+    color.r    += heat * 0.55;
+    color.g    += heat * 0.22;
+    color.b    -= heat * 0.15;
+
+    // Traffic shimmer
+    color += vec3(traffic);
+
+    gl_FragColor = vec4(color, terminal.a);
+}
+`;
+
+function compileShader(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+        console.error('Shader error:', gl.getShaderInfoLog(s));
+    return s;
+}
+
+const prog = gl.createProgram();
+gl.attachShader(prog, compileShader(gl.VERTEX_SHADER, VS));
+gl.attachShader(prog, compileShader(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
+    console.error('Program link error:', gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+
+// Full-screen quad
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+    -1,-1,  1,-1, -1, 1,
+     1,-1,  1, 1, -1, 1
+]), gl.STATIC_DRAW);
+const aPos = gl.getAttribLocation(prog, 'aPos');
+gl.enableVertexAttribArray(aPos);
+gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+const uResolution = gl.getUniformLocation(prog, 'iResolution');
+const uTime       = gl.getUniformLocation(prog, 'iTime');
+const uChannel0   = gl.getUniformLocation(prog, 'iChannel0');
+
+// Texture
+const tex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, tex);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+// ─────────────────────────────────────────────
+//  Resize
+// ─────────────────────────────────────────────
+function resize() {
+    const W = window.innerWidth;
+    const H = window.innerHeight;
+    textCanvas.width  = W;
+    textCanvas.height = H;
+    glCanvas.width    = W;
+    glCanvas.height   = H;
+    gl.viewport(0, 0, W, H);
+    gl.uniform2f(uResolution, W, H);
+}
+
+// ─────────────────────────────────────────────
+//  Input
+// ─────────────────────────────────────────────
+['input','keydown','keyup','click','mouseup'].forEach(ev =>
+    input.addEventListener(ev, drawText)
+);
+
+// ─────────────────────────────────────────────
+//  Render loop
+// ─────────────────────────────────────────────
+const t0 = Date.now();
+function frame() {
+    drawText();
+
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, textCanvas);
+
+    gl.uniform1f(uTime, (Date.now() - t0) / 1000.0);
+    gl.uniform1i(uChannel0, 0);
+
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    requestAnimationFrame(frame);
+}
+
+window.addEventListener('resize', resize);
+resize();
+input.focus();
+frame();
+</script>
+</body>
+</html>

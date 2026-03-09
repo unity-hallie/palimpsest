@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Physarum Tuner</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #1a1612;
+    color: #c4b9a7;
+    font-family: "SF Mono", monospace;
+    font-size: 12px;
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
+  }
+  #sidebar {
+    width: 260px;
+    flex-shrink: 0;
+    padding: 12px;
+    overflow-y: auto;
+    border-right: 1px solid #333;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  h1 { font-size: 13px; color: #f5f0e8; margin-bottom: 4px; }
+  .section { color: #8b7355; font-size: 10px; margin-top: 8px; margin-bottom: 2px; text-transform: uppercase; letter-spacing: 1px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+  .row label { flex: 1; color: #a89070; }
+  .row input[type=range] { flex: 1.2; accent-color: #8b7355; }
+  .row .val { width: 38px; text-align: right; color: #f5f0e8; }
+  #canvasWrap { flex: 1; display: flex; align-items: center; justify-content: center; background: #0d0b09; }
+  canvas { image-rendering: pixelated; }
+  #controls { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  button {
+    background: #2c2416; border: 1px solid #8b7355; color: #c4b9a7;
+    padding: 4px 10px; cursor: pointer; font-family: inherit; font-size: 11px;
+  }
+  button:hover { background: #3d3020; }
+  #fps { color: #5c4a3a; font-size: 10px; margin-top: 4px; }
+  .hint { color: #5c4a3a; font-size: 10px; margin-top: 8px; line-height: 1.5; }
+  #exportBtn { margin-top: 4px; }
+</style>
+</head>
+<body>
+<div id="sidebar">
+  <h1>🍄 Physarum Tuner</h1>
+  <div id="fps">-- fps</div>
+
+  <div class="section">Sensors</div>
+  <div class="row"><label>sensor dist</label><input type="range" id="sensorDist" min="2" max="30" step="0.5" value="14"><span class="val" id="sensorDistV">14</span></div>
+  <div class="row"><label>sensor angle °</label><input type="range" id="sensorAngle" min="5" max="80" step="1" value="30"><span class="val" id="sensorAngleV">30</span></div>
+  <div class="row"><label>turn speed</label><input type="range" id="turnSpeed" min="0.01" max="0.5" step="0.01" value="0.18"><span class="val" id="turnSpeedV">0.18</span></div>
+
+  <div class="section">Trail</div>
+  <div class="row"><label>deposit</label><input type="range" id="deposit" min="0.02" max="0.6" step="0.01" value="0.28"><span class="val" id="depositV">0.28</span></div>
+  <div class="row"><label>decay</label><input type="range" id="decay" min="0.001" max="0.15" step="0.001" value="0.032"><span class="val" id="decayV">0.032</span></div>
+  <div class="row"><label>diffusion</label><input type="range" id="diffusion" min="0" max="1" step="0.01" value="0.15"><span class="val" id="diffusionV">0.15</span></div>
+
+  <div class="section">Dehydration (blob crush)</div>
+  <div class="row"><label>strength</label><input type="range" id="dehydStrength" min="0" max="3" step="0.05" value="1.2"><span class="val" id="dehydStrengthV">1.2</span></div>
+  <div class="row"><label>threshold</label><input type="range" id="dehydThresh" min="0.05" max="0.6" step="0.01" value="0.18"><span class="val" id="dehydThreshV">0.18</span></div>
+
+  <div class="section">Food</div>
+  <div class="row"><label>inject strength</label><input type="range" id="foodInject" min="0.01" max="0.8" step="0.01" value="0.22"><span class="val" id="foodInjectV">0.22</span></div>
+  <div class="row"><label>spore rate</label><input type="range" id="sporeRate" min="0" max="0.2" step="0.002" value="0.04"><span class="val" id="sporeRateV">0.04</span></div>
+
+  <div class="section">Display</div>
+  <div class="row"><label>edge boost</label><input type="range" id="edgeBoost" min="0" max="2" step="0.05" value="0.9"><span class="val" id="edgeBoostV">0.9</span></div>
+  <div class="row"><label>interior crush</label><input type="range" id="intCrush" min="0" max="1" step="0.01" value="0.55"><span class="val" id="intCrushV">0.55</span></div>
+  <div class="row"><label>alpha scale</label><input type="range" id="alphaScale" min="0.1" max="2" step="0.05" value="0.87"><span class="val" id="alphaScaleV">0.87</span></div>
+
+  <div id="controls">
+    <button id="resetBtn">Reset</button>
+    <button id="pauseBtn">Pause</button>
+    <button id="foodBtn">Toggle food</button>
+    <button id="exportBtn">Copy params →</button>
+  </div>
+
+  <div class="hint">
+    Click canvas to drop food.<br>
+    Drag to paint a food line.<br>
+    "Copy params" → MSL constants.
+  </div>
+</div>
+
+<div id="canvasWrap">
+  <canvas id="cv"></canvas>
+</div>
+
+<script>
+// ── Canvas setup ──────────────────────────────────────────────────────────────
+const cv = document.getElementById('cv');
+const wrap = document.getElementById('canvasWrap');
+const W = 600, H = 400;
+cv.width = W; cv.height = H;
+cv.style.width  = Math.min(wrap.clientWidth  - 20, W * 2) + 'px';
+cv.style.height = Math.min(wrap.clientHeight - 20, H * 2) + 'px';
+
+const ctx = cv.getContext('2d');
+
+// ── State arrays ──────────────────────────────────────────────────────────────
+let trail      = new Float32Array(W * H);
+let heading    = new Float32Array(W * H);
+let food       = new Float32Array(W * H);
+let trailNext  = new Float32Array(W * H);
+// Separate deposit accumulator — forward-scatter deposits here, then diffuse
+let deposit    = new Float32Array(W * H);
+
+// ── Parameters (live) ─────────────────────────────────────────────────────────
+const P = {
+  sensorDist:    14,
+  sensorAngle:   30 * Math.PI / 180,
+  turnSpeed:     0.18,
+  deposit:       0.28,
+  decay:         0.032,
+  diffusion:     0.15,
+  dehydStrength: 1.20,
+  dehydThresh:   0.18,
+  foodInject:    0.22,
+  sporeRate:     0.04,
+  edgeBoost:     0.90,
+  intCrush:      0.55,
+  alphaScale:    0.87,
+};
+
+// ── Slider wiring ─────────────────────────────────────────────────────────────
+function wire(id, key, scale) {
+  const el = document.getElementById(id);
+  const vEl = document.getElementById(id + 'V');
+  el.addEventListener('input', () => {
+    const v = parseFloat(el.value);
+    P[key] = (key === 'sensorAngle') ? v * Math.PI / 180 : v;
+    vEl.textContent = v;
+  });
+}
+wire('sensorDist',    'sensorDist');
+wire('sensorAngle',   'sensorAngle');
+wire('turnSpeed',     'turnSpeed');
+wire('deposit',       'deposit');
+wire('decay',         'decay');
+wire('diffusion',     'diffusion');
+wire('dehydStrength', 'dehydStrength');
+wire('dehydThresh',   'dehydThresh');
+wire('foodInject',    'foodInject');
+wire('sporeRate',     'sporeRate');
+wire('edgeBoost',     'edgeBoost');
+wire('intCrush',      'intCrush');
+wire('alphaScale',    'alphaScale');
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function sampleTrail(x, y) {
+  x = Math.max(0, Math.min(W-1, Math.round(x)));
+  y = Math.max(0, Math.min(H-1, Math.round(y)));
+  return trail[y * W + x];
+}
+
+function sense(x, y, angle) {
+  const sx = x + Math.cos(angle) * P.sensorDist;
+  const sy = y + Math.sin(angle) * P.sensorDist;
+  return sampleTrail(sx, sy);
+}
+
+function hash(x, y) {
+  let v = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+  return v - Math.floor(v);
+}
+
+// ── Food rendering ────────────────────────────────────────────────────────────
+let showFood = true;
+const TEXT_LINES = [
+  { text: "hello",   x: 80,  y: 130 },
+  { text: "world",   x: 80,  y: 200 },
+  { text: "physarum",x: 80,  y: 270 },
+];
+
+function renderTextToFood() {
+  // Draw text into an offscreen canvas, read pixels as food map
+  const off = document.createElement('canvas');
+  off.width = W; off.height = H;
+  const oc = off.getContext('2d');
+  oc.fillStyle = '#ffffff';
+  oc.fillRect(0, 0, W, H);
+  oc.fillStyle = '#000000';
+  oc.font = 'bold 52px "SF Mono", monospace';
+  for (const l of TEXT_LINES) oc.fillText(l.text, l.x, l.y);
+  const img = oc.getImageData(0, 0, W, H);
+  for (let i = 0; i < W * H; i++) {
+    // darkness = 1 - luma
+    const r = img.data[i*4], g = img.data[i*4+1], b = img.data[i*4+2];
+    const luma = (0.299*r + 0.587*g + 0.114*b) / 255;
+    food[i] = Math.max(0, 1 - luma - 0.1); // threshold ~0.1
+  }
+}
+renderTextToFood();
+
+// ── Simulation step ───────────────────────────────────────────────────────────
+// Two-pass:
+//   Pass 1 — sense + update headings, scatter deposit FORWARD into deposit[]
+//   Pass 2 — diffuse trail, apply decay+dehydration, add deposit[], swap
+function step() {
+  // ── Pass 1: sense, steer, scatter deposit forward ─────────────────────────
+  deposit.fill(0);
+
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = y * W + x;
+      const t = trail[i];
+      const f = food[i];
+      let h = heading[i];
+
+      // Germination at fresh ink — only where trail is nearly empty
+      const rng = hash(x * 0.017 + 3.7, y * 0.017 + 11.1);
+      if (f > 0.1 && t < 0.06 && rng < f * P.sporeRate) {
+        // Orient toward richest nearby fresh food
+        let bestVal = 0, bestAng = Math.random() * Math.PI * 2;
+        for (let d = 0; d < 8; d++) {
+          const ang = d * Math.PI / 4;
+          const sx = Math.round(x + Math.cos(ang) * 4);
+          const sy = Math.round(y + Math.sin(ang) * 4);
+          if (sx >= 0 && sx < W && sy >= 0 && sy < H) {
+            const fv = food[sy*W+sx] * (1 - trail[sy*W+sx]);
+            if (fv > bestVal) { bestVal = fv; bestAng = ang; }
+          }
+        }
+        h = bestAng;
+        heading[i] = h;
+        // Deposit a seed burst at this location
+        deposit[i] += 0.25;
+      }
+
+      if (t < 0.02) continue; // dormant pixel — skip sensing/deposit
+
+      // Sense in 3 directions
+      const fwd   = sense(x, y, h);
+      const left  = sense(x, y, h + P.sensorAngle);
+      const right = sense(x, y, h - P.sensorAngle);
+
+      if (fwd >= left && fwd >= right) {
+        // straight
+      } else if (left > right) {
+        h += P.turnSpeed;
+      } else if (right > left) {
+        h -= P.turnSpeed;
+      } else {
+        h += (hash(x * 0.013, y * 0.013) - 0.5) * 0.5;
+      }
+      h = ((h % (Math.PI*2)) + Math.PI*2) % (Math.PI*2);
+      heading[i] = h;
+
+      // ── Forward scatter: deposit at position AHEAD, not here ──────────────
+      // This is what creates actual directional trail — the particle "moves"
+      // its chemical signal forward. Each pixel reads the trail of pixels
+      // that are pointing toward it (implicitly, via scatter→diffuse).
+      const STEP = 1.5; // how far forward to scatter (pixels)
+      const tx = x + Math.cos(h) * STEP;
+      const ty = y + Math.sin(h) * STEP;
+      const tx0 = Math.floor(tx), ty0 = Math.floor(ty);
+      const fx = tx - tx0, fy = ty - ty0;
+      // Bilinear scatter into the 4 surrounding pixels
+      const amt = t * P.deposit;
+      for (let dy = 0; dy <= 1; dy++) {
+        for (let dx = 0; dx <= 1; dx++) {
+          const nx = tx0 + dx, ny = ty0 + dy;
+          if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+          const wx = dx === 0 ? (1-fx) : fx;
+          const wy = dy === 0 ? (1-fy) : fy;
+          deposit[ny*W+nx] += amt * wx * wy;
+        }
+      }
+
+      // Food also injects deposit at current pixel (food is local, not directional)
+      deposit[i] += f * P.foodInject * (1 - t);
+    }
+  }
+
+  // ── Pass 2: diffuse trail, apply decay + dehydration, add deposit ──────────
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = y * W + x;
+
+      // 3×3 weighted diffusion
+      let diffused = trail[i] * 4;
+      let wt = 4;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          const nx = Math.max(0, Math.min(W-1, x+dx));
+          const ny = Math.max(0, Math.min(H-1, y+dy));
+          diffused += trail[ny*W+nx];
+          wt++;
+        }
+      }
+      diffused /= wt;
+      // Blend between sharp trail and diffused (diffusion rate controls spread)
+      diffused = trail[i] * (1 - P.diffusion) + diffused * P.diffusion;
+
+      // 8-neighbor avg for dehydration
+      let nbSum = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          const nx = Math.max(0, Math.min(W-1, x+dx));
+          const ny = Math.max(0, Math.min(H-1, y+dy));
+          nbSum += trail[ny*W+nx];
+        }
+      }
+      const nbAvg = nbSum / 8;
+      const thickness = Math.max(0, Math.min(1,
+        (nbAvg - P.dehydThresh) / (0.55 - P.dehydThresh)));
+      const dehydDecay = P.dehydStrength * thickness * thickness;
+      const totalDecay = P.decay + dehydDecay;
+
+      trailNext[i] = Math.max(0, Math.min(1,
+        diffused * (1 - totalDecay) + deposit[i]
+      ));
+    }
+  }
+
+  let tmp = trail; trail = trailNext; trailNext = tmp;
+}
+
+// ── Render ────────────────────────────────────────────────────────────────────
+const imageData = ctx.createImageData(W, H);
+const px = imageData.data;
+
+// Paper color: #F5F0E8
+const PAPER = [245, 240, 232];
+// Strand colors
+const COL_SPORE  = [245, 237, 148];
+const COL_YOUNG  = [204, 163,  46];
+const COL_MATURE = [133,  87,  15];
+
+function lerp3(a, b, t) {
+  t = Math.max(0, Math.min(1, t));
+  return [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t];
+}
+
+function render() {
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = y * W + x;
+      const t = trail[i];
+
+      // Sobel edge on trail
+      const get = (dx, dy) => {
+        const nx = Math.max(0, Math.min(W-1, x+dx));
+        const ny = Math.max(0, Math.min(H-1, y+dy));
+        return trail[ny*W+nx];
+      };
+      const gx = (get(1,0)-get(-1,0)) + 0.5*((get(1,1)-get(-1,1))+(get(1,-1)-get(-1,-1)));
+      const gy = (get(0,1)-get(0,-1)) + 0.5*((get(1,1)-get(1,-1))+(get(-1,1)-get(-1,-1)));
+      const grad = Math.sqrt(gx*gx + gy*gy);
+      const edge = Math.max(0, Math.min(1, (grad - 0.04) / 0.26));
+
+      // Interior suppression
+      let nbSum = 0;
+      for (let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++) {
+        if(dx===0&&dy===0) continue;
+        nbSum += get(dx,dy);
+      }
+      const interior = Math.max(0, Math.min(1,
+        (nbSum/8 * t - 0.15) / (P.intCrush - 0.15)));
+
+      // Color from trail magnitude
+      const maturity = Math.max(0, Math.min(1, t / 0.6));
+      const oldness  = Math.max(0, Math.min(1, (t - 0.3) / 0.7));
+      let col = lerp3(COL_SPORE, COL_YOUNG, maturity);
+      col = lerp3(col, COL_MATURE, oldness);
+      // Edge highlight
+      col = lerp3(col, [Math.min(255,col[0]*1.35+18), Math.min(255,col[1]*1.35+13), Math.min(255,col[2]*1.35+3)], edge * P.edgeBoost * 0.75);
+
+      // Food overlay (faint red tint where food is)
+      if (showFood) {
+        const f = food[i];
+        if (f > 0.05) {
+          col = lerp3(col, [180, 60, 20], f * 0.15);
+        }
+      }
+
+      // Alpha
+      const edgeAlpha = edge * t * 0.90;
+      const bodyAlpha = t * 0.30 * (1 - interior);
+      let alpha = Math.max(edgeAlpha, bodyAlpha);
+      alpha *= Math.max(0, Math.min(1, maturity * (1/0.25)));
+      alpha = Math.max(0, Math.min(1, alpha * P.alphaScale));
+
+      // Composite over paper
+      const r = PAPER[0] + (col[0] - PAPER[0]) * alpha;
+      const g = PAPER[1] + (col[1] - PAPER[1]) * alpha;
+      const b = PAPER[2] + (col[2] - PAPER[2]) * alpha;
+
+      const pi = i * 4;
+      px[pi]   = r;
+      px[pi+1] = g;
+      px[pi+2] = b;
+      px[pi+3] = 255;
+    }
+  }
+  ctx.putImageData(imageData, 0, 0);
+}
+
+// ── Mouse painting ────────────────────────────────────────────────────────────
+let mouseDown = false;
+let lastMouse = null;
+
+function canvasToSim(e) {
+  const rect = cv.getBoundingClientRect();
+  const scaleX = W / rect.width;
+  const scaleY = H / rect.height;
+  return {
+    x: Math.round((e.clientX - rect.left) * scaleX),
+    y: Math.round((e.clientY - rect.top)  * scaleY),
+  };
+}
+
+function paintFood(x, y, radius = 6) {
+  for (let dy = -radius; dy <= radius; dy++) {
+    for (let dx = -radius; dx <= radius; dx++) {
+      if (dx*dx + dy*dy > radius*radius) continue;
+      const nx = x + dx, ny = y + dy;
+      if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+      food[ny*W+nx] = Math.min(1, food[ny*W+nx] + 0.8);
+    }
+  }
+}
+
+cv.addEventListener('mousedown', e => { mouseDown = true; lastMouse = canvasToSim(e); paintFood(lastMouse.x, lastMouse.y); });
+cv.addEventListener('mouseup',   () => { mouseDown = false; lastMouse = null; });
+cv.addEventListener('mousemove', e => {
+  if (!mouseDown) return;
+  const p = canvasToSim(e);
+  paintFood(p.x, p.y);
+  lastMouse = p;
+});
+
+// ── Controls ──────────────────────────────────────────────────────────────────
+document.getElementById('resetBtn').addEventListener('click', () => {
+  trail.fill(0); heading.fill(0); trailNext.fill(0); deposit.fill(0);
+});
+
+let paused = false;
+document.getElementById('pauseBtn').addEventListener('click', () => {
+  paused = !paused;
+  document.getElementById('pauseBtn').textContent = paused ? 'Resume' : 'Pause';
+});
+
+document.getElementById('foodBtn').addEventListener('click', () => {
+  showFood = !showFood;
+});
+
+document.getElementById('exportBtn').addEventListener('click', () => {
+  const deg = Math.round(parseFloat(document.getElementById('sensorAngle').value));
+  const txt = `// ── Tuning ───────────────────────────────────────────────────────────────────
+constant float SENSOR_DIST    = ${P.sensorDist.toFixed(1)};
+constant float SENSOR_ANGLE   = ${P.sensorAngle.toFixed(3)};  // ~${deg}°
+constant float TURN_SPEED     = ${P.turnSpeed.toFixed(3)};
+constant float MOVE_DEPOSIT   = ${P.deposit.toFixed(3)};
+constant float BASE_DECAY     = ${P.decay.toFixed(4)};
+constant float FOOD_INJECT    = ${P.foodInject.toFixed(3)};
+constant float FOOD_THRESH    = 0.18;
+constant float DEHYDRATION    = ${P.dehydStrength.toFixed(3)};
+constant float DEHYD_THRESH   = ${P.dehydThresh.toFixed(3)};
+constant float SPORE_RATE     = ${P.sporeRate.toFixed(4)};`;
+  navigator.clipboard.writeText(txt).then(() => {
+    document.getElementById('exportBtn').textContent = 'Copied!';
+    setTimeout(() => document.getElementById('exportBtn').textContent = 'Copy params →', 1500);
+  });
+});
+
+// ── Loop ──────────────────────────────────────────────────────────────────────
+let lastTime = performance.now();
+let frameCount = 0;
+const fpsEl = document.getElementById('fps');
+
+function loop() {
+  if (!paused) {
+    step();
+    render();
+    frameCount++;
+    const now = performance.now();
+    if (now - lastTime > 500) {
+      fpsEl.textContent = Math.round(frameCount / (now - lastTime) * 1000) + ' fps';
+      frameCount = 0;
+      lastTime = now;
+    }
+  }
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>

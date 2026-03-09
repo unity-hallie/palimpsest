@@ -1,0 +1,203 @@
+// PHYSARUM COMPUTE KERNEL — two-channel minimal state
+//
+// State texture (rgba16f):
+//   R = trail pheromone density  [0,1]
+//   A = heading angle            [0,1] mapped to [0, 2π)
+//   G, B = unused (zero)
+//
+// Finite food: food injection = isInk * (1 - trail)
+//   Full trail → already colonized → no new energy injected (food exhausted)
+//   Empty trail at ink pixel → fresh food available → inject pheromone
+//   This is implicit finite food — no extra channel needed.
+//
+// Dehydration pressure: neighbor trail average measures local thickness.
+//   Blob interior → high neighbor avg → heavy extra decay → blobs collapse
+//   Strand edge   → low neighbor avg  → survives → network emerges
+//
+// Texture bindings:
+//   t0  = iChannel0 (terminal frame — ink map)
+//   t2  = iChannel1 (display feedback — entropy seed)
+//   t3  = state_read
+//   t8  = state_write
+
+#include <metal_stdlib>
+using namespace metal;
+
+// ── Tuning ────────────────────────────────────────────────────────────────────
+
+constant float SENSOR_DIST    = 14.0;  // pixels ahead — far enough to see strand signal
+constant float SENSOR_ANGLE   = 0.52;  // radians left/right (~30°) — narrow enough to discriminate
+constant float TURN_SPEED     = 0.18;  // fast turning → decisive, not mushy
+
+constant float MOVE_DEPOSIT   = 0.28;  // strong deposit → trail reinforces itself
+constant float BASE_DECAY     = 0.032; // faster decay → trail can't flood everywhere
+
+// Implicit finite food: fresh ink injects pheromone scaled by (1-trail).
+// When trail is saturated the injection vanishes — the letter is "eaten".
+constant float FOOD_INJECT    = 0.22;  // max injection at empty ink pixel
+constant float FOOD_THRESH    = 0.18;  // ink darkness threshold
+
+// Dehydration: thick neighborhoods decay faster → strands over blobs.
+// Must be sharp enough to actually kill blob interiors.
+constant float DEHYDRATION    = 1.20;  // strong crush — blobs must die
+constant float DEHYD_THRESH   = 0.18;  // kicks in early
+
+constant float SPORE_RATE     = 0.04;  // germination chance per frame at ink
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+float luma3(float3 c) { return dot(c, float3(0.299, 0.587, 0.114)); }
+
+float hash21(float2 p) {
+    p = fract(p * float2(127.1, 311.7));
+    p += dot(p, p.yx + 19.19);
+    return fract(p.x * p.y);
+}
+
+float sampleTrail(texture2d<float, access::sample> tex, sampler smp, float2 uv) {
+    return tex.sample(smp, uv).r;
+}
+
+float sense(
+    texture2d<float, access::sample> state,
+    sampler smp, float2 uv, float2 px, float angle
+) {
+    float2 suv = clamp(uv + float2(cos(angle), sin(angle)) * SENSOR_DIST * px,
+                       float2(0.001), float2(0.999));
+    return sampleTrail(state, smp, suv);
+}
+
+// 3×3 weighted blur — diffusion
+float diffuse(texture2d<float, access::sample> tex, sampler smp, float2 uv, float2 px) {
+    float t = 0.0, w = 0.0;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            float wt = (dx == 0 && dy == 0) ? 4.0 : 1.0;
+            t += tex.sample(smp, uv + float2(float(dx), float(dy)) * px).r * wt;
+            w += wt;
+        }
+    }
+    return t / w;
+}
+
+// 8-neighbor average — measures local thickness for dehydration
+float neighborAvg(texture2d<float, access::sample> tex, sampler smp, float2 uv, float2 px) {
+    float t = 0.0;
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++)
+            if (dx != 0 || dy != 0)
+                t += tex.sample(smp, uv + float2(float(dx), float(dy)) * px).r;
+    return t / 8.0;
+}
+
+// ── Kernel ────────────────────────────────────────────────────────────────────
+
+kernel void computeMain(
+    texture2d<float, access::sample> terminal   [[ texture(0) ]],
+    texture2d<float, access::sample> feedback   [[ texture(2) ]],
+    texture2d<float, access::sample> state_read [[ texture(3) ]],
+    texture2d<float, access::write>  state_write[[ texture(8) ]],
+    uint2                            gid        [[ thread_position_in_grid ]]
+) {
+    uint W = state_write.get_width();
+    uint H = state_write.get_height();
+    if (gid.x >= W || gid.y >= H) return;
+
+    constexpr sampler smp(filter::linear, address::clamp_to_edge);
+    float2 uv = (float2(gid) + 0.5) / float2(W, H);
+    float2 px = 1.0 / float2(W, H);
+
+    // ── Read state ─────────────────────────────────────────────────────────
+    float4 prev   = state_read.sample(smp, uv);
+    float trail   = prev.r;
+    float heading = prev.a * M_PI_F * 2.0;
+
+    // ── Ink / food map ─────────────────────────────────────────────────────
+    float inkDark = 1.0 - luma3(terminal.sample(smp, uv).rgb);
+    float isInk   = smoothstep(FOOD_THRESH, FOOD_THRESH + 0.25, inkDark);
+
+    // ── Directional sensing ────────────────────────────────────────────────
+    if (trail > 0.05) {
+        float fwd   = sense(state_read, smp, uv, px, heading);
+        float left  = sense(state_read, smp, uv, px, heading + SENSOR_ANGLE);
+        float right = sense(state_read, smp, uv, px, heading - SENSOR_ANGLE);
+
+        if (fwd >= left && fwd >= right) {
+            // straight ahead
+        } else if (left > right) {
+            heading += TURN_SPEED;
+        } else if (right > left) {
+            heading -= TURN_SPEED;
+        } else {
+            float3 fs  = feedback.sample(smp, float2(0.5)).rgb;
+            float  seed = fract(dot(fs, float3(13.7, 53.3, 91.1)));
+            heading += (hash21(float2(gid) * 0.013 + seed * 73.1) - 0.5) * 0.5;
+        }
+
+        // Steer toward food ahead vs behind (uses ink directly — no stored channel)
+        float2 fwdDir  = float2(cos(heading), sin(heading));
+        float inkFwd   = 1.0 - luma3(terminal.sample(smp,
+                             clamp(uv + fwdDir * 8.0 * px, 0.001, 0.999)).rgb);
+        float inkBack  = 1.0 - luma3(terminal.sample(smp,
+                             clamp(uv - fwdDir * 8.0 * px, 0.001, 0.999)).rgb);
+        // Weight by (1-trail at that location): fresh food > depleted food
+        float trailFwd = sampleTrail(state_read, smp, clamp(uv + fwdDir * 8.0 * px, 0.001, 0.999));
+        float trailBck = sampleTrail(state_read, smp, clamp(uv - fwdDir * 8.0 * px, 0.001, 0.999));
+        float foodFwd  = inkFwd  * (1.0 - trailFwd);
+        float foodBack = inkBack * (1.0 - trailBck);
+        if (foodBack > foodFwd + 0.12) {
+            heading += M_PI_F * 0.08;
+        }
+    } else {
+        // No trail yet — random heading
+        float3 fs   = feedback.sample(smp, float2(0.5)).rgb;
+        float  seed = fract(dot(fs, float3(13.7, 53.3, 91.1)));
+        heading = hash21(float2(gid) * 0.031 + seed * 97.3) * M_PI_F * 2.0;
+    }
+
+    heading = fmod(heading + M_PI_F * 2.0, M_PI_F * 2.0);
+
+    // ── Dehydration: penalise thick blobs ──────────────────────────────────
+    float nbAvg    = neighborAvg(state_read, smp, uv, px);
+    float thickness = smoothstep(DEHYD_THRESH, 0.70, nbAvg);
+    float dehydDecay = DEHYDRATION * thickness * thickness;
+
+    // ── Diffusion + deposit ────────────────────────────────────────────────
+    float diffused = diffuse(state_read, smp, uv, px);
+    float deposit  = trail * MOVE_DEPOSIT;
+
+    // Implicit finite food: injection = isInk × (1 - trail)
+    // Fresh ink pixel with no trail → full injection
+    // Colonised pixel → trail≈1 → injection→0 (exhausted)
+    deposit += isInk * FOOD_INJECT * (1.0 - trail);
+
+    float totalDecay = BASE_DECAY + dehydDecay;
+    float newTrail   = clamp(diffused * (1.0 - totalDecay) + deposit * 0.5, 0.0, 1.0);
+
+    // ── Spontaneous germination at fresh ink ───────────────────────────────
+    float3 fs2      = feedback.sample(smp, float2(0.5)).rgb;
+    float frameSeed = fract(dot(fs2, float3(13.7, 53.3, 91.1)));
+    float rng       = hash21(float2(gid) * 0.017 + frameSeed * 127.1);
+    // Only germinate where ink exists AND trail is still low (fresh food)
+    if (rng < isInk * SPORE_RATE * (1.0 - trail * 3.0) && trail < 0.08) {
+        newTrail += 0.28;
+        // Orient toward richest nearby fresh food
+        float2 bestDir = float2(1.0, 0.0);
+        float  bestVal = 0.0;
+        for (int i = 0; i < 8; i++) {
+            float  ang = float(i) * M_PI_F * 0.25;
+            float2 dir = float2(cos(ang), sin(ang));
+            float2 suv = clamp(uv + dir * 4.0 * px, 0.001, 0.999);
+            float  ink = 1.0 - luma3(terminal.sample(smp, suv).rgb);
+            float  tr  = sampleTrail(state_read, smp, suv);
+            float  val = ink * (1.0 - tr); // fresh food score
+            if (val > bestVal) { bestVal = val; bestDir = dir; }
+        }
+        heading = atan2(bestDir.y, bestDir.x);
+        newTrail = clamp(newTrail, 0.0, 1.0);
+    }
+
+    // ── Write — only R and A ───────────────────────────────────────────────
+    float headingPacked = fmod(heading, M_PI_F * 2.0) / (M_PI_F * 2.0);
+    state_write.write(float4(newTrail, 0.0, 0.0, headingPacked), gid);
+}

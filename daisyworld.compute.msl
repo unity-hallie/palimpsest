@@ -1,0 +1,376 @@
+// daisyworld.compute.msl — climate cellular automata
+//
+// State texture (rgba16f):
+//   R = temperature    [0,1]  (pixel 0,0 G: frame counter)
+//   G = moisture       [0,1]  — water content, evaporates/condenses/rains
+//   B = biomass        [0,1]  — vegetation density, type emergent from conditions
+//   A = elevation      [0,1]  — terrain height, seeded from noise, mostly static
+//
+// Text luminance is solar radiation. Heat drives evaporation. Moisture
+// condenses at altitude and in cool zones. Rain feeds biomass. Biomass
+// cools and retains moisture. The system self-regulates.
+
+#include <metal_stdlib>
+using namespace metal;
+
+// ── Tuning ──────────────────────────────────────────────────────────────────
+#define TEMP_DIFFUSE      0.35f    // very high = geological thermal mass
+#define MOISTURE_DIFFUSE  0.20f
+#define SOLAR_STRENGTH    0.025f   // text radiates real warmth
+#define AMBIENT_COOL      0.005f    // very slow radiative cooling
+#define AMBIENT_TEMP      0.40f    // warmer baseline — not an ice planet
+#define ALTITUDE_COOL     0.07f
+
+#define EVAPORATION       0.008f
+#define CONDENSATION      0.006f
+#define WATER_DRAIN       0.0015f
+
+#define BIOMASS_GROW      0.010f
+#define BIOMASS_SPREAD    0.006f
+#define BIOMASS_DEATH     0.001f    // very slow baseline decay
+#define BIOMASS_STRESS    0.005f    // gentle stress — life persists
+#define BIOMASS_COOL      0.03f
+#define BIOMASS_RETAIN    0.02f
+
+#define WIND_STRENGTH     0.0015f
+// ────────────────────────────────────────────────────────────────────────────
+
+static float hash21(float2 p) {
+    p = fract(p * float2(127.1f, 311.7f));
+    p += dot(p, p.yx + 19.19f);
+    return fract(p.x * p.y);
+}
+
+static float vnoise(float2 p) {
+    float2 i = floor(p), f = fract(p);
+    f = f * f * (3.0f - 2.0f * f);
+    float a = hash21(i),          b = hash21(i + float2(1, 0)),
+          c = hash21(i + float2(0, 1)), d = hash21(i + float2(1, 1));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+static float fbm(float2 p, int octaves) {
+    float v = 0.0f, a = 0.5f;
+    for (int i = 0; i < octaves; i++) {
+        v += a * vnoise(p);
+        p *= 2.0f;
+        a *= 0.5f;
+    }
+    return v;
+}
+
+static float2 curlNoise(float2 p, float t) {
+    float e = 0.5f;
+    float2 pt = p + float2(t * 0.02f, t * 0.015f);
+    float n  = vnoise(pt);
+    float dx = vnoise(pt + float2(e, 0.0f)) - n;
+    float dy = vnoise(pt + float2(0.0f, e)) - n;
+    return float2(dy, -dx) / e;
+}
+
+static float lumaF(float4 s) {
+    return s.r * 0.299f + s.g * 0.587f + s.b * 0.114f;
+}
+
+kernel void computeMain(
+    texture2d<float, access::sample> terminal    [[ texture(0) ]],
+    texture2d<float, access::sample> feedback    [[ texture(2) ]],
+    texture2d<float, access::sample> state_read  [[ texture(3) ]],
+    texture2d<float, access::write>  state_write [[ texture(8) ]],
+    uint2 gid [[ thread_position_in_grid ]]
+) {
+    uint W = state_write.get_width();
+    uint H = state_write.get_height();
+    if (gid.x >= W || gid.y >= H) return;
+
+    constexpr sampler smp(filter::linear, address::clamp_to_edge);
+    float2 uv = (float2(gid) + 0.5f) / float2(W, H);
+    float2 px = 1.0f / float2(W, H);
+
+    // ── Frame counter ──────────────────────────────────────────────────────
+    float2 cornerUV = float2(0.5f / float(W), 0.5f / float(H));
+    float prevFrame = state_read.sample(smp, cornerUV).g;
+    float frame = fmod(prevFrame + 1.0f, 10000.0f);
+
+    if (gid.x == 0u && gid.y == 0u) {
+        float4 corner = state_read.sample(smp, cornerUV);
+        state_write.write(float4(corner.r, frame, corner.b, corner.a), gid);
+        return;
+    }
+
+    // ── Read state ─────────────────────────────────────────────────────────
+    float4 st = state_read.sample(smp, uv);
+    float temp     = st.r;
+    float moisture = st.g;
+    float biomass  = st.b;
+    float elev     = st.a;
+
+    // ── Bootstrap: seed elevation from noise, unique per window ─────────────
+    if (frame < 10.0f && elev < 0.01f) {
+        // Hash terminal content for per-window seed
+        float seed = lumaF(terminal.sample(smp, float2(0.5f, 0.5f)))
+                   + lumaF(terminal.sample(smp, float2(0.3f, 0.7f))) * 7.13f
+                   + lumaF(terminal.sample(smp, float2(0.8f, 0.2f))) * 3.71f
+                   + lumaF(terminal.sample(smp, float2(0.1f, 0.3f))) * 11.3f;
+        float e = fbm(uv * 6.0f + seed * 100.0f, 5);
+        e = smoothstep(0.15f, 0.65f, e);  // bias toward land
+        e = e * 0.7f + 0.2f;              // floor at 0.2, ceiling at 0.9
+        elev = e;
+        moisture = 0.3f + hash21(uv * 300.0f + seed) * 0.2f;
+        temp = AMBIENT_TEMP;
+    }
+
+    // ── Sample neighbors ───────────────────────────────────────────────────
+    float4 nL = state_read.sample(smp, uv + float2(-px.x, 0));
+    float4 nR = state_read.sample(smp, uv + float2( px.x, 0));
+    float4 nU = state_read.sample(smp, uv + float2(0, -px.y));
+    float4 nD = state_read.sample(smp, uv + float2(0,  px.y));
+
+    // ── Text luminance (solar input, multi-ring disc blur) ─────────────────
+    // Four rings: tight for detail, wide for diffuse warmth
+    float solar = lumaF(terminal.sample(smp, uv)) * 0.12f;
+    for (int i = 0; i < 6; i++) {
+        float angle = float(i) * 1.0472f;
+        float2 dir = float2(cos(angle), sin(angle));
+        solar += lumaF(terminal.sample(smp, uv + dir * px * 5.0f))   * 0.05f;
+        solar += lumaF(terminal.sample(smp, uv + dir * px * 15.0f))  * 0.04f;
+        solar += lumaF(terminal.sample(smp, uv + dir * px * 40.0f))  * 0.03f;
+        solar += lumaF(terminal.sample(smp, uv + dir * px * 100.0f)) * 0.02f;
+    }
+
+    // ── Terminal color warmth (for biome influence) ────────────────────────
+    float4 termS = terminal.sample(smp, uv);
+    float termWarmth = termS.r * 0.4f + termS.g * 0.2f - termS.b * 0.2f;
+
+    // ── Temperature ────────────────────────────────────────────────────────
+    // Spatial diffusion — moisture adds thermal mass (wet ground resists change)
+    float tAvg = (nL.r + nR.r + nU.r + nD.r) * 0.25f;
+    float thermalMass = 1.0f + moisture * 2.0f;  // wet = sluggish, dry = volatile
+    float diffRate = (tAvg > temp ? TEMP_DIFFUSE : TEMP_DIFFUSE * 0.3f) / thermalMass;
+    temp = mix(temp, tAvg, diffRate);
+
+    // Direct text warmth: text melts ice immediately — your presence is fire
+    if (solar > 0.03f) {
+        temp = max(temp, 0.35f * solar + temp * (1.0f - solar));
+    }
+
+    // Ice-albedo feedback (only matters away from text)
+    float iceFactor = smoothstep(0.25f, 0.10f, temp) * smoothstep(0.1f, 0.4f, moisture);
+    float albedo = mix(1.0f, 0.55f, iceFactor);
+
+    // Day/night cycle — sun sweeps across the world
+    float dayT = frame * 0.016f;
+    float sunX = sin(dayT * 0.08f) * 0.5f + 0.5f;  // sun x position [0,1], ~80s cycle
+    float daylight = 1.0f - smoothstep(0.0f, 0.45f, abs(uv.x - sunX));  // 1 at sun, 0 far away
+    daylight = daylight * 0.6f + 0.4f;  // night floor at 0.4 — never fully dark
+
+    // Solar heating — modulated by albedo and daylight
+    float solarSmooth = solar > 0.05f ? solar : 0.0f;
+    temp += solarSmooth * SOLAR_STRENGTH * albedo * daylight;
+
+    // Altitude cooling
+    temp -= elev * ALTITUDE_COOL;
+
+    // Latitude cooling — screen edges are polar
+    float latitude = abs(uv.y - 0.5f) * 2.0f;  // 0 at equator, 1 at poles
+    temp -= latitude * latitude * 0.06f;          // gentle poles, lose up to 0.06
+
+    // Biomass cooling (but also lowers albedo — dark vegetation absorbs heat)
+    float bioAlbedo = 1.0f + biomass * 0.02f;  // vegetation absorbs slightly more
+    temp -= biomass * BIOMASS_COOL;
+    temp += biomass * solar * 0.002f;  // dark canopy absorbs what ice would reflect
+
+    // Radiative cooling toward ambient — Milankovitch ice age cycle
+    float ageT = frame * 0.016f;  // ~real seconds
+    float iceAge = sin(ageT * 0.015f) * 0.12f;  // ±0.12 swing, ~7min full cycle
+    float ambient = AMBIENT_TEMP + iceAge;
+    temp += (ambient - temp) * AMBIENT_COOL;
+
+    // Water bodies: low albedo, absorb heat, massive thermal mass
+    float isWater = smoothstep(0.3f, 0.1f, elev) * smoothstep(0.3f, 0.6f, moisture);
+    temp += isWater * SOLAR_STRENGTH * 0.5f;  // ocean absorbs solar even without text
+    temp = mix(temp, max(AMBIENT_TEMP, temp), isWater * 0.08f);  // thermal mass holds warmth
+
+    temp = clamp(temp, 0.0f, 1.0f);
+
+    // ── Moisture with convection ─────────────────────────────────────────
+    float mAvg = (nL.g + nR.g + nU.g + nD.g) * 0.25f;
+    moisture = mix(moisture, mAvg, MOISTURE_DIFFUSE);
+
+    // Temperature gradient → convective transport
+    // Warm areas push moisture outward; Coriolis deflects for circulation cells
+    float2 tempGrad = float2(nR.r - nL.r, nD.r - nU.r);
+    float2 convection = tempGrad * 0.08f;
+    // Coriolis deflection — creates circular cells instead of linear flow
+    convection += float2(-tempGrad.y, tempGrad.x) * 0.05f;
+
+    // Prevailing wind (slow planetary-scale drift)
+    float t = frame * 0.016f;
+    float2 wind = float2(
+        sin(t * 0.05f + uv.y * 3.0f) * WIND_STRENGTH,
+        cos(t * 0.07f + uv.x * 2.0f) * WIND_STRENGTH * 0.5f
+    );
+
+    // Advect moisture along convection + wind
+    float2 transport = convection + wind;
+    float2 sourceUV = uv - transport;
+    float advectedMoisture = state_read.sample(smp, sourceUV).g;
+    moisture = mix(moisture, advectedMoisture, 0.08f);
+
+    // Evaporation: hot ground loses moisture (vegetation protects)
+    float evap = max(temp - 0.4f, 0.0f) * EVAPORATION * (1.0f - biomass * 0.5f);
+    moisture -= evap;
+
+    // Condensation: cool areas and high altitude
+    float condense = max(0.5f - temp, 0.0f) * (0.5f + elev) * CONDENSATION;
+    moisture += condense;
+
+    // Orographic rain: moisture hitting rising terrain dumps water
+    float eL = nL.a, eR = nR.a, eU = nU.a, eD = nD.a;
+    float elevGrad = max(elev - (eL + eR + eU + eD) * 0.25f, 0.0f);
+    moisture += elevGrad * 0.01f;
+
+    // Water flows downhill
+    float flowIn  = max(eL - elev, 0.0f) * nL.g
+                  + max(eR - elev, 0.0f) * nR.g
+                  + max(eU - elev, 0.0f) * nU.g
+                  + max(eD - elev, 0.0f) * nD.g;
+    float flowOut = max(elev - eL, 0.0f)
+                  + max(elev - eR, 0.0f)
+                  + max(elev - eU, 0.0f)
+                  + max(elev - eD, 0.0f);
+    moisture += flowIn * 0.02f;
+    moisture -= flowOut * moisture * 0.01f;
+
+    // General drain: moisture escapes to atmosphere/groundwater
+    // Biomass retains moisture (reduces drain, doesn't add moisture)
+    float drain = WATER_DRAIN * (1.0f - biomass * 0.6f);
+    moisture -= drain;
+
+    // Gaian moisture regulation: the biosphere nudges toward habitability
+    float gaiaTarget = 0.35f + biomass * 0.1f;
+    float gaiaStrength = 0.001f;
+    moisture += (gaiaTarget - moisture) * gaiaStrength;
+
+    moisture = clamp(moisture, 0.0f, 1.0f);
+
+    // ── Biomass (CA step every 12 frames — geological pace) ────────────────
+    bool caStep = fmod(frame, 12.0f) < 1.0f;
+
+    if (caStep) {
+        // Wide temperature tolerance — life finds a way
+        float tempFit = exp(-3.0f * pow(temp - 0.40f, 2.0f));
+        // Moisture: anything above bone dry, up to saturated
+        float moistFit = smoothstep(0.05f, 0.25f, moisture) * smoothstep(1.0f, 0.8f, moisture);
+        float fitness = tempFit * moistFit;
+
+        // Warm-colored light promotes growth
+        float lightBoost = clamp(termWarmth * solar * 2.0f, -0.3f, 0.3f);
+        fitness *= (1.0f + lightBoost);
+
+        // Direct sunlight bonus — text presence accelerates growth
+        fitness += solar * 0.3f;
+
+        // No growth underwater
+        float landFactor = smoothstep(0.1f, 0.25f, elev);
+        fitness *= landFactor;
+
+        float nBioAvg = (nL.b + nR.b + nU.b + nD.b) * 0.25f;
+        float growth = fitness * BIOMASS_GROW * 2.0f + nBioAvg * fitness * BIOMASS_SPREAD * 2.0f;
+        float stress = max(1.0f - fitness, 0.0f);
+        float death = BIOMASS_DEATH + stress * BIOMASS_STRESS;
+        biomass += growth - biomass * death;
+
+        // More frequent seeding
+        float rng = hash21(uv * 1000.0f + float2(frame * 0.1f, frame * 0.07f));
+        if (rng > 0.993f && biomass < 0.05f && fitness > 0.15f) {
+            biomass += 0.1f;
+        }
+    }
+
+    biomass = clamp(biomass, 0.0f, 1.0f);
+
+    // ── Erosion: carves rivers ───────────────────────────────────────────
+    // Water concentrates in low paths → erodes more → deeper paths → more water
+    // This positive feedback carves channels
+    float soilStability = 1.0f - biomass * 0.8f;
+
+    // Flow concentration: how much water is passing through this cell
+    // Low cells between higher neighbors collect flow
+    float flowConcentration = max(flowIn, 0.0f);
+
+    // Erosion: proportional to flow concentration × slope
+    // Concentrated flow carves; sheet flow doesn't
+    float slopeStrength = max(flowOut, 0.0f);
+    float erosionRate = (flowConcentration * 0.5f + moisture * 0.5f)
+                      * slopeStrength * 0.00003f * soilStability;
+
+    float depositionRate = 0.0f;
+    float sedimentSmooth = 0.0f;
+
+    // Tectonic uplift: reverse transverse mercator projection of text
+    // Left margin (x=0, where text starts) maps to a drifting pole in screen center.
+    // Text near the left edge → strongest mantle signal at the pole.
+    // Text far right → weak signal at the margins. Wraps cylindrically.
+    float poleDrift = 0.5f + sin(t * 0.003f) * 0.25f;  // pole x drifts [0.25, 0.75]
+    float poleY = 0.5f + cos(t * 0.002f) * 0.15f;      // slight y wobble
+
+    // Map screen UV to mantle UV: wrap text-x around the pole
+    // Text x=0 (left margin) → mantleUV = pole center
+    // Text x=1 (right edge) → mantleUV = antipode (screen edges)
+    float2 fromPole = uv - float2(poleDrift, poleY);
+    float dist = length(fromPole);
+    float mantleAngle = atan2(fromPole.y, fromPole.x);
+    // Reverse: distance from pole → text x position (0 at pole, 1 at edge)
+    float textX = clamp(dist * 2.0f, 0.0f, 1.0f);
+    // Angle around pole → text y position
+    float textY = fract(mantleAngle / 6.2832f + 0.5f);
+    float2 mantleUV = float2(textX, textY);
+
+    float textPresence = 0.0f;
+    for (int i = 0; i < 6; i++) {
+        float angle = float(i) * 1.0472f;
+        float2 dir = float2(cos(angle), sin(angle));
+        textPresence += lumaF(terminal.sample(smp, mantleUV + dir * px * 120.0f));
+        textPresence += lumaF(terminal.sample(smp, mantleUV + dir * px * 200.0f));
+    }
+    textPresence /= 12.0f;
+    // Subsidence where no mantle pressure
+    float uplift = (textPresence - 0.03f) * 0.0006f;
+
+    // Freeze-thaw weathering at ice margins
+    float freezeThaw = smoothstep(0.15f, 0.25f, temp) * smoothstep(0.25f, 0.15f, temp);
+    freezeThaw *= smoothstep(0.1f, 0.4f, moisture);
+
+    // ── Mantle convection — plates drift on deep currents ────────────────
+    // Large-scale curl noise = convection cells. Very slow, very large.
+    float mantleT = frame * 0.016f;
+    float2 mantle1 = curlNoise(uv * 3.0f,  mantleT * 0.01f) * 0.0008f;
+    float2 mantle2 = curlNoise(uv * 1.5f,  mantleT * 0.007f + 50.0f) * 0.0005f;
+    float2 mantleFlow = mantle1 + mantle2;
+
+    // Advect elevation along mantle flow — crust drifts
+    float2 crustSourceUV = uv - mantleFlow;
+    float advectedElev = state_read.sample(smp, crustSourceUV).a;
+    elev = mix(elev, advectedElev, 0.04f);  // slow coupling — plates are sluggish
+
+    // Divergent zones (mantle pulling apart) = rift valleys, thin crust
+    // Convergent zones (mantle pushing together) = mountain building
+    float divergence = (state_read.sample(smp, uv + float2(px.x, 0)).a
+                      - state_read.sample(smp, uv - float2(px.x, 0)).a) * mantleFlow.x
+                     + (state_read.sample(smp, uv + float2(0, px.y)).a
+                      - state_read.sample(smp, uv - float2(0, px.y)).a) * mantleFlow.y;
+    elev += divergence * 0.8f;  // convergence builds, divergence rifts
+
+    // Net: uplift builds, erosion carves, convection drifts
+    elev += uplift + sedimentSmooth - erosionRate - freezeThaw * 0.00003f;
+    elev += depositionRate;
+
+    // Sigmoid tendency: sharpens land/sea contrast around the water line
+    float sigmoid = 1.0f / (1.0f + exp(-10.0f * (elev - 0.35f)));
+    elev = mix(elev, sigmoid, 0.001f);
+
+    elev = clamp(elev, 0.0f, 1.0f);
+
+    state_write.write(float4(temp, moisture, biomass, elev), gid);
+}

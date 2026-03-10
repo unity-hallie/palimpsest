@@ -116,6 +116,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float sunAngle = (uv.x - sunX) * 6.28;
     vec2 lightDir = normalize(vec2(cos(sunAngle), -0.6));
     float hillshade = 0.5 + dot(slope, lightDir) * 0.5;
+    // Water is flat — no hillshade on ocean
+    float isWaterShade = smoothstep(0.0, 0.2, moisture - elev * 2.0);
+    hillshade = mix(hillshade, 0.5, isWaterShade);
     ground *= mix(0.75, 1.25, hillshade);
 
     // ── Day/night lighting ──────────────────────────────────────────────

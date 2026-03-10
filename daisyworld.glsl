@@ -111,6 +111,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float hillshade = 0.5 + dot(slope, normalize(vec2(0.5, -0.7))) * 0.5;
     ground *= mix(0.85, 1.15, hillshade);
 
+    // ── Volcanic glow ─────────────────────────────────────────────────
+    // Extreme heat = lava. Glows orange-red, visible even at night.
+    float lavaIntensity = smoothstep(0.55, 0.75, temp) * smoothstep(0.3, 0.6, elev);
+    vec3 lavaColor = mix(vec3(0.6, 0.15, 0.0), vec3(1.0, 0.4, 0.05), lavaIntensity);
+    ground = mix(ground, lavaColor, lavaIntensity * 0.7);
+
     // ── Day/night lighting ──────────────────────────────────────────────
     // Read sun position from state (compute drives this via frame counter)
     float dayT = iTime * 0.08;

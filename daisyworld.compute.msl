@@ -98,6 +98,36 @@ kernel void computeMain(
         return;
     }
 
+    // ── Tectonic pole: pixel (1,0) stores pole position ──────────────────
+    // The pole drifts under mantle convection + torque. Self-referential.
+    float2 polePixelUV = float2(1.5f / float(W), 0.5f / float(H));
+    float4 poleData = state_read.sample(smp, polePixelUV);
+    float2 polePos = float2(poleData.r, poleData.g);
+
+    if (gid.x == 1u && gid.y == 0u) {
+        // Bootstrap
+        if (frame < 10.0f) polePos = float2(0.5f, 0.5f);
+
+        float mt = frame * 0.016f;
+        // Sample convection at the pole's own location
+        float2 flow1 = curlNoise(polePos * 3.0f,  mt * 0.01f) * 0.0008f;
+        float2 flow2 = curlNoise(polePos * 1.5f,  mt * 0.007f + 50.0f) * 0.0005f;
+        float2 poleFlow = flow1 + flow2;
+
+        // Torque: pole spins slowly around screen center
+        float2 toCenter = float2(0.5f, 0.5f) - polePos;
+        float2 torque = float2(-toCenter.y, toCenter.x) * 0.0002f;
+
+        // Centering spring — don't let it escape to edges
+        float2 spring = toCenter * 0.001f;
+
+        polePos += poleFlow * 0.5f + torque + spring;
+        polePos = clamp(polePos, float2(0.15f), float2(0.85f));
+
+        state_write.write(float4(polePos.x, polePos.y, 0.0f, 0.0f), gid);
+        return;
+    }
+
     // ── Read state ─────────────────────────────────────────────────────────
     float4 st = state_read.sample(smp, uv);
     float temp     = st.r;
@@ -309,16 +339,8 @@ kernel void computeMain(
     float sedimentSmooth = 0.0f;
 
     // Tectonic uplift: reverse transverse mercator projection of text
-    // Left margin (x=0, where text starts) maps to a drifting pole in screen center.
-    // Text near the left edge → strongest mantle signal at the pole.
-    // Text far right → weak signal at the margins. Wraps cylindrically.
-    float poleDrift = 0.5f + sin(t * 0.003f) * 0.25f;  // pole x drifts [0.25, 0.75]
-    float poleY = 0.5f + cos(t * 0.002f) * 0.15f;      // slight y wobble
-
-    // Map screen UV to mantle UV: wrap text-x around the pole
-    // Text x=0 (left margin) → mantleUV = pole center
-    // Text x=1 (right edge) → mantleUV = antipode (screen edges)
-    float2 fromPole = uv - float2(poleDrift, poleY);
+    // Pole position drifts under mantle convection (stored in pixel 1,0)
+    float2 fromPole = uv - polePos;
     float dist = length(fromPole);
     float mantleAngle = atan2(fromPole.y, fromPole.x);
     // Reverse: distance from pole → text x position (0 at pole, 1 at edge)
@@ -362,7 +384,58 @@ kernel void computeMain(
                       - state_read.sample(smp, uv - float2(0, px.y)).a) * mantleFlow.y;
     elev += divergence * 0.8f;  // convergence builds, divergence rifts
 
-    // Net: uplift builds, erosion carves, convection drifts
+    // ── Volcanoes ─────────────────────────────────────────────────────────
+    // Hotspots drift with the mantle. Eruptions are stochastic — pressure
+    // builds at convergent zones and hotspots, then pops.
+    float volcanism = 0.0f;
+    float volcHeat = 0.0f;
+    float volcAsh = 0.0f;
+
+    for (int v = 0; v < 7; v++) {
+        float fv = float(v);
+        // Hotspot positions drift slowly — like Hawaii tracking over its plume
+        float2 hotspot = float2(
+            fract(fv * 0.31f + mantleT * 0.005f * (0.8f + fv * 0.1f)),
+            fract(fv * 0.47f + mantleT * 0.004f * (0.9f + fv * 0.07f))
+        );
+        float hdist = length(uv - hotspot);
+
+        // Eruption cycle: pressure builds as sine, erupts at peak
+        float pressure = sin(mantleT * (0.03f + fv * 0.007f) + fv * 4.2f);
+        float erupting = smoothstep(0.85f, 0.98f, pressure);  // sharp eruption peak
+
+        // Convergent zones are more volcanic
+        float convergence = clamp(-divergence * 20.0f, 0.0f, 1.0f);
+        float localVolcanism = erupting * (0.5f + convergence * 0.5f);
+
+        if (hdist < 0.06f) {
+            float falloff = 1.0f - hdist / 0.06f;
+            falloff *= falloff;
+
+            // Elevation: lava builds a cone
+            volcanism += falloff * localVolcanism * 0.003f;
+
+            // Heat: magma is hot
+            volcHeat += falloff * localVolcanism * 0.15f;
+
+            // Ash cloud: wider radius, adds moisture (steam)
+            if (hdist < 0.12f) {
+                float ashFall = 1.0f - hdist / 0.12f;
+                volcAsh += ashFall * localVolcanism * 0.008f;
+            }
+        }
+    }
+
+    // Apply volcanic effects
+    elev += volcanism;
+    temp += volcHeat;
+    moisture += volcAsh;  // steam and ash clouds carry moisture
+
+    // Volcanic kill zone — lava sterilizes
+    float lavaKill = smoothstep(0.0f, 0.08f, volcHeat);
+    biomass *= (1.0f - lavaKill * 0.5f);
+
+    // Net: uplift builds, erosion carves, convection drifts, volcanoes erupt
     elev += uplift + sedimentSmooth - erosionRate - freezeThaw * 0.00003f;
     elev += depositionRate;
 

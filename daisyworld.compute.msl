@@ -17,10 +17,10 @@ using namespace metal;
 #define HEAT_SPREAD       1.0f     // master knob: scales all heat propagation
 #define TEMP_DIFFUSE      0.35f    // very high = geological thermal mass
 #define MOISTURE_DIFFUSE  0.20f
-#define SOLAR_STRENGTH    0.025f   // text radiates real warmth
-#define AMBIENT_COOL      0.005f    // very slow radiative cooling
-#define AMBIENT_TEMP      0.40f    // warmer baseline — not an ice planet
-#define ALTITUDE_COOL     0.07f
+#define SOLAR_STRENGTH    0.045f   // text radiates real warmth (compensates for incidence angle)
+#define AMBIENT_COOL      0.012f    // radiative equilibrium with space
+#define AMBIENT_TEMP      0.50f    // warm planet — equator should be tropical
+#define ALTITUDE_COOL     0.008f
 
 #define EVAPORATION       0.008f
 #define CONDENSATION      0.006f
@@ -30,7 +30,7 @@ using namespace metal;
 #define BIOMASS_SPREAD    0.006f
 #define BIOMASS_DEATH     0.001f    // very slow baseline decay
 #define BIOMASS_STRESS    0.005f    // gentle stress — life persists
-#define BIOMASS_COOL      0.03f
+#define BIOMASS_COOL      0.008f
 #define BIOMASS_RETAIN    0.02f
 
 #define WIND_STRENGTH     0.0015f
@@ -148,9 +148,10 @@ kernel void computeMain(
                    + lumaF(terminal.sample(smp, float2(0.3f, 0.7f))) * 7.13f
                    + lumaF(terminal.sample(smp, float2(0.8f, 0.2f))) * 3.71f
                    + lumaF(terminal.sample(smp, float2(0.1f, 0.3f))) * 11.3f;
-        float e = fbm(uv * 6.0f + seed * 100.0f, 6);       // continental
-        float detail = fbm(uv * 24.0f + seed * 50.0f, 4); // hills and ridges
-        e = e * 0.75f + detail * 0.25f;                    // blend
+        float e = fbm(uv * 5.0f + seed * 100.0f, 7);        // continental
+        float detail = fbm(uv * 30.0f + seed * 50.0f, 5); // hills and ridges
+        float micro = fbm(uv * 80.0f + seed * 25.0f, 3);  // crags and valleys
+        e = e * 0.55f + detail * 0.30f + micro * 0.15f;
         e = smoothstep(0.15f, 0.65f, e);
         e = e * 0.7f + 0.2f;
         elev = e;
@@ -305,7 +306,7 @@ kernel void computeMain(
 
     if (caStep) {
         // Wide temperature tolerance — life finds a way
-        float tempFit = exp(-3.0f * pow(temp - 0.40f, 2.0f));
+        float tempFit = exp(-2.0f * pow(temp - 0.35f, 2.0f));
         // Moisture: anything above bone dry, up to saturated
         float moistFit = smoothstep(0.05f, 0.25f, moisture) * smoothstep(1.0f, 0.8f, moisture);
         float fitness = tempFit * moistFit;
@@ -425,21 +426,21 @@ kernel void computeMain(
         float convergence = clamp(-divergence * 20.0f, 0.0f, 1.0f);
         float localVolcanism = erupting * (0.5f + convergence * 0.5f);
 
-        if (hdist < 0.06f) {
-            float falloff = 1.0f - hdist / 0.06f;
+        // Ash cloud: wider radius
+        if (hdist < 0.10f) {
+            float ashFall = 1.0f - hdist / 0.10f;
+            volcAsh += ashFall * localVolcanism * 0.004f;
+        }
+
+        if (hdist < 0.04f) {
+            float falloff = 1.0f - hdist / 0.04f;
             falloff *= falloff;
 
-            // Elevation: lava builds a cone
-            volcanism += falloff * localVolcanism * 0.003f;
+            // Elevation: lava builds a small cone
+            volcanism += falloff * localVolcanism * 0.001f;
 
-            // Heat: magma is hot
-            volcHeat += falloff * localVolcanism * 0.15f;
-
-            // Ash cloud: wider radius, adds moisture (steam)
-            if (hdist < 0.12f) {
-                float ashFall = 1.0f - hdist / 0.12f;
-                volcAsh += ashFall * localVolcanism * 0.008f;
-            }
+            // Heat: magma is hot but localized
+            volcHeat += falloff * localVolcanism * 0.08f;
         }
     }
 

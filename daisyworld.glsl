@@ -12,7 +12,7 @@
 #define CLOUD_OPACITY     0.20     // moisture haze in atmosphere
 #define WATER_DEPTH       0.3      // how dark deep water gets
 #define SNOW_LINE         0.72     // elevation above which snow appears
-#define ICE_TEMP          0.15     // temperature below which ice forms (wide band)
+#define ICE_TEMP          0.08     // temperature below which ice forms
 // ────────────────────────────────────────────────────────────────────────────
 
 float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
@@ -22,7 +22,7 @@ vec3 biomeColor(float temp, float moisture, float biomass, float elev) {
     // Water is where moisture exceeds what the land can hold
     // High elevation = well-drained, needs lots of moisture to be "water"
     // Low elevation = basin, even moderate moisture pools
-    float drainCapacity = elev * 1.5;  // high ground drains
+    float drainCapacity = elev * 2.0;  // high ground drains more aggressively
     float waterExcess = moisture - drainCapacity;
     float isWater = smoothstep(0.0, 0.2, waterExcess);
     vec3 shallowWater = vec3(0.08, 0.15, 0.32);
@@ -59,7 +59,7 @@ vec3 biomeColor(float temp, float moisture, float biomass, float elev) {
     // Cold biomes
     vec3 coldBiome = mix(rock, tundra, wetness);
     // Warm biomes
-    vec3 warmBiome = mix(desert, mix(savanna, grassland, wetness), wetness);
+    vec3 warmBiome = mix(desert, mix(savanna, grassland, wetness), smoothstep(0.0, 0.2, wetness));
     // Hot biomes
     vec3 hotBiome = mix(desert, jungle, wetness);
 
@@ -67,14 +67,14 @@ vec3 biomeColor(float temp, float moisture, float biomass, float elev) {
     land = mix(coldBiome, warmBiome, smoothstep(0.20, 0.38, temp));
     land = mix(land, hotBiome, smoothstep(0.50, 0.65, temp));
 
-    // Biomass pushes hard into green — life is visible
+    // Biomass pushes into green — even a little life shows
     vec3 lifeGreen = mix(grassland, forest, biomass);
-    land = mix(land, lifeGreen, biomass * biomass * smoothstep(0.1, 0.35, moisture));
+    land = mix(land, lifeGreen, biomass * smoothstep(0.08, 0.25, moisture));
 
     // Snow at high elevation or very cold — but not on active volcanoes
     float snowAmount = smoothstep(SNOW_LINE, 0.95, elev)
                      + smoothstep(ICE_TEMP, 0.0, temp) * 0.5;
-    snowAmount *= smoothstep(0.55, 0.40, temp);  // heat melts snow
+    snowAmount *= smoothstep(0.30, 0.15, temp);  // any warmth melts snow
     snowAmount = clamp(snowAmount, 0.0, 1.0);
     land = mix(land, ice, snowAmount * (1.0 - moisture * 0.3));
 
@@ -100,21 +100,25 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float biomass  = blurred.b;
     float elev     = st.a;  // elevation is stable, no blur needed
 
+    // ── Sun position (needed for hillshade + day/night) ─────────────────
+    float dayT = iTime * 0.08;
+    float sunX = fract(dayT * 0.133);
+
     // ── Ground ──────────────────────────────────────────────────────────
     vec3 ground = biomeColor(temp, moisture, biomass, elev);
 
-    // Subtle elevation shading (hillshade)
+    // Elevation normal map — light follows the sun
     float eL = texture(iChannel2, uv + vec2(-px.x, 0)).a;
     float eR = texture(iChannel2, uv + vec2( px.x, 0)).a;
     float eU = texture(iChannel2, uv + vec2(0, -px.y)).a;
     float eD = texture(iChannel2, uv + vec2(0,  px.y)).a;
-    vec2 slope = vec2(eR - eL, eD - eU) * 8.0;
-    float hillshade = 0.5 + dot(slope, normalize(vec2(0.5, -0.7))) * 0.5;
-    ground *= mix(0.85, 1.15, hillshade);
+    vec2 slope = vec2(eR - eL, eD - eU) * 12.0;
+    float sunAngle = (uv.x - sunX) * 6.28;
+    vec2 lightDir = normalize(vec2(cos(sunAngle), -0.6));
+    float hillshade = 0.5 + dot(slope, lightDir) * 0.5;
+    ground *= mix(0.75, 1.25, hillshade);
 
     // ── Day/night lighting ──────────────────────────────────────────────
-    float dayT = iTime * 0.08;
-    float sunX = fract(dayT * 0.133);
     float sunDist = abs(uv.x - sunX);
     sunDist = min(sunDist, 1.0 - sunDist);
     float daylight = 1.0 - smoothstep(0.0, 0.45, sunDist);

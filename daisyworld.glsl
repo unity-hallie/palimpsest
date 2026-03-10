@@ -11,7 +11,7 @@
 #define TEXT_BLEND        0.10     // ground color bleeding into text
 #define CLOUD_OPACITY     0.20     // moisture haze in atmosphere
 #define WATER_DEPTH       0.3      // how dark deep water gets
-#define SNOW_LINE         0.88     // elevation above which snow appears
+#define SNOW_LINE         0.72     // elevation above which snow appears
 #define ICE_TEMP          0.15     // temperature below which ice forms (wide band)
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -32,20 +32,20 @@ vec3 biomeColor(float temp, float moisture, float biomass, float elev) {
     waterColor = mix(waterColor, vec3(0.08, 0.20, 0.22), smoothstep(0.4, 0.7, temp) * 0.3);
 
     // ── Land biomes ─────────────────────────────────────────────────────
-    // Desert: hot + dry
-    vec3 desert = vec3(0.40, 0.30, 0.12);
-    // Savanna: warm + moderate moisture — golden-green
-    vec3 savanna = vec3(0.32, 0.35, 0.08);
-    // Grassland: moderate temp + moisture — warm bright green
-    vec3 grassland = vec3(0.18, 0.38, 0.05);
-    // Forest: warm + wet + high biomass — warm olive-green (NOT blue-green)
-    vec3 forest = vec3(0.10, 0.32, 0.02);
-    // Jungle: hot + very wet — rich warm green
-    vec3 jungle = vec3(0.06, 0.28, 0.03);
-    // Tundra: cold + some moisture — grey-green
-    vec3 tundra = vec3(0.20, 0.25, 0.18);
-    // Rock: cold + dry + high elevation
-    vec3 rock = vec3(0.18, 0.16, 0.14);
+    // Desert: hot + dry — ochre clay
+    vec3 desert = vec3(0.45, 0.30, 0.10);
+    // Savanna: warm + moderate moisture — yellow-green
+    vec3 savanna = vec3(0.30, 0.38, 0.06);
+    // Grassland: moderate temp + moisture — true green
+    vec3 grassland = vec3(0.12, 0.42, 0.05);
+    // Forest: warm + wet + high biomass — deep green
+    vec3 forest = vec3(0.06, 0.35, 0.03);
+    // Jungle: hot + very wet — saturated emerald
+    vec3 jungle = vec3(0.03, 0.32, 0.05);
+    // Tundra: cold + some moisture — sage
+    vec3 tundra = vec3(0.20, 0.26, 0.16);
+    // Rock: cold + dry + high elevation — warm grey
+    vec3 rock = vec3(0.20, 0.17, 0.13);
     // Ice/snow
     vec3 ice = vec3(0.7, 0.75, 0.8);
 
@@ -71,9 +71,10 @@ vec3 biomeColor(float temp, float moisture, float biomass, float elev) {
     vec3 lifeGreen = mix(grassland, forest, biomass);
     land = mix(land, lifeGreen, biomass * biomass * smoothstep(0.1, 0.35, moisture));
 
-    // Snow at high elevation or very cold
+    // Snow at high elevation or very cold — but not on active volcanoes
     float snowAmount = smoothstep(SNOW_LINE, 0.95, elev)
                      + smoothstep(ICE_TEMP, 0.0, temp) * 0.5;
+    snowAmount *= smoothstep(0.55, 0.40, temp);  // heat melts snow
     snowAmount = clamp(snowAmount, 0.0, 1.0);
     land = mix(land, ice, snowAmount * (1.0 - moisture * 0.3));
 
@@ -111,25 +112,25 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float hillshade = 0.5 + dot(slope, normalize(vec2(0.5, -0.7))) * 0.5;
     ground *= mix(0.85, 1.15, hillshade);
 
-    // ── Volcanic glow ─────────────────────────────────────────────────
-    // Extreme heat = lava. Glows orange-red, visible even at night.
-    float lavaIntensity = smoothstep(0.55, 0.75, temp) * smoothstep(0.3, 0.6, elev);
-    vec3 lavaColor = mix(vec3(0.6, 0.15, 0.0), vec3(1.0, 0.4, 0.05), lavaIntensity);
-    ground = mix(ground, lavaColor, lavaIntensity * 0.7);
-
     // ── Day/night lighting ──────────────────────────────────────────────
-    // Read sun position from state (compute drives this via frame counter)
     float dayT = iTime * 0.08;
-    float sunX = sin(dayT) * 0.5 + 0.5;
-    float daylight = 1.0 - smoothstep(0.0, 0.45, abs(uv.x - sunX));
-    daylight = daylight * 0.6 + 0.4;  // night floor 0.4
+    float sunX = fract(dayT * 0.133);
+    float sunDist = abs(uv.x - sunX);
+    sunDist = min(sunDist, 1.0 - sunDist);
+    float daylight = 1.0 - smoothstep(0.0, 0.45, sunDist);
+    daylight = daylight * 0.7 + 0.3;
 
-    // Tint: warm gold in daylight, cool blue at night
     vec3 dayTint   = vec3(1.05, 1.0, 0.88);
-    vec3 nightTint = vec3(0.75, 0.8, 0.95);
+    vec3 nightTint = vec3(0.55, 0.6, 0.85);
     vec3 lightTint = mix(nightTint, dayTint, daylight);
 
     ground *= lightTint;
+
+    // ── Volcanic glow (after lighting — lava makes its own light) ─────
+    float isWater = smoothstep(0.0, 0.2, moisture - elev * 1.5);
+    float lavaIntensity = smoothstep(0.55, 0.75, temp) * smoothstep(0.3, 0.6, elev) * (1.0 - isWater);
+    vec3 lavaColor = mix(vec3(0.6, 0.15, 0.0), vec3(1.0, 0.4, 0.05), lavaIntensity);
+    ground = mix(ground, lavaColor, lavaIntensity * 0.7);
 
     // Moisture haze (clouds/fog in wet areas)
     float haze = smoothstep(0.5, 0.85, moisture) * CLOUD_OPACITY;

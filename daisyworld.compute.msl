@@ -14,6 +14,7 @@
 using namespace metal;
 
 // ── Tuning ──────────────────────────────────────────────────────────────────
+#define HEAT_SPREAD       1.0f     // master knob: scales all heat propagation
 #define TEMP_DIFFUSE      0.35f    // very high = geological thermal mass
 #define MOISTURE_DIFFUSE  0.20f
 #define SOLAR_STRENGTH    0.025f   // text radiates real warmth
@@ -83,9 +84,14 @@ kernel void computeMain(
     uint H = state_write.get_height();
     if (gid.x >= W || gid.y >= H) return;
 
-    constexpr sampler smp(filter::linear, address::clamp_to_edge);
+    constexpr sampler smp(filter::linear, s_address::repeat, t_address::mirrored_repeat);
     float2 uv = (float2(gid) + 0.5f) / float2(W, H);
     float2 px = 1.0f / float2(W, H);
+
+    // Spherical projection: horizontal distances compress toward poles
+    float lat = (uv.y - 0.5f) * 3.14159f;  // -π/2 to π/2
+    float cosLat = max(cos(lat), 0.15f);    // floor to avoid singularity at poles
+    float2 spx = float2(px.x / cosLat, px.y);  // stretched horizontal pixel step
 
     // ── Frame counter ──────────────────────────────────────────────────────
     float2 cornerUV = float2(0.5f / float(W), 0.5f / float(H));
@@ -142,19 +148,21 @@ kernel void computeMain(
                    + lumaF(terminal.sample(smp, float2(0.3f, 0.7f))) * 7.13f
                    + lumaF(terminal.sample(smp, float2(0.8f, 0.2f))) * 3.71f
                    + lumaF(terminal.sample(smp, float2(0.1f, 0.3f))) * 11.3f;
-        float e = fbm(uv * 6.0f + seed * 100.0f, 5);
-        e = smoothstep(0.15f, 0.65f, e);  // bias toward land
-        e = e * 0.7f + 0.2f;              // floor at 0.2, ceiling at 0.9
+        float e = fbm(uv * 6.0f + seed * 100.0f, 6);       // continental
+        float detail = fbm(uv * 24.0f + seed * 50.0f, 4); // hills and ridges
+        e = e * 0.75f + detail * 0.25f;                    // blend
+        e = smoothstep(0.15f, 0.65f, e);
+        e = e * 0.7f + 0.2f;
         elev = e;
         moisture = 0.3f + hash21(uv * 300.0f + seed) * 0.2f;
         temp = AMBIENT_TEMP;
     }
 
-    // ── Sample neighbors ───────────────────────────────────────────────────
-    float4 nL = state_read.sample(smp, uv + float2(-px.x, 0));
-    float4 nR = state_read.sample(smp, uv + float2( px.x, 0));
-    float4 nU = state_read.sample(smp, uv + float2(0, -px.y));
-    float4 nD = state_read.sample(smp, uv + float2(0,  px.y));
+    // ── Sample neighbors (spherical spacing) ───────────────────────────────
+    float4 nL = state_read.sample(smp, uv + float2(-spx.x, 0));
+    float4 nR = state_read.sample(smp, uv + float2( spx.x, 0));
+    float4 nU = state_read.sample(smp, uv + float2(0, -spx.y));
+    float4 nD = state_read.sample(smp, uv + float2(0,  spx.y));
 
     // ── Text luminance (solar input, multi-ring disc blur) ─────────────────
     // Four rings: tight for detail, wide for diffuse warmth
@@ -172,12 +180,28 @@ kernel void computeMain(
     float4 termS = terminal.sample(smp, uv);
     float termWarmth = termS.r * 0.4f + termS.g * 0.2f - termS.b * 0.2f;
 
+    // ── Atmospheric wind (shared by temperature + moisture) ────────────────
+    float2 tempGrad = float2(nR.r - nL.r, nD.r - nU.r);
+    float2 convection = tempGrad * 0.08f;
+    convection += float2(-tempGrad.y, tempGrad.x) * 0.05f;  // Coriolis
+    float t = frame * 0.016f;
+    float2 wind = float2(
+        sin(t * 0.05f + uv.y * 3.0f) * WIND_STRENGTH,
+        cos(t * 0.07f + uv.x * 2.0f) * WIND_STRENGTH * 0.5f
+    );
+    float2 transport = convection + wind;
+
     // ── Temperature ────────────────────────────────────────────────────────
     // Spatial diffusion — moisture adds thermal mass (wet ground resists change)
     float tAvg = (nL.r + nR.r + nU.r + nD.r) * 0.25f;
     float thermalMass = 1.0f + moisture * 2.0f;  // wet = sluggish, dry = volatile
-    float diffRate = (tAvg > temp ? TEMP_DIFFUSE : TEMP_DIFFUSE * 0.3f) / thermalMass;
+    float diffRate = (tAvg > temp ? TEMP_DIFFUSE : TEMP_DIFFUSE * 0.3f) / thermalMass * HEAT_SPREAD;
     temp = mix(temp, tAvg, diffRate);
+
+    // Wind advects heat — warm fronts, cold fronts
+    float2 heatSourceUV = uv - transport;
+    float advectedTemp = state_read.sample(smp, heatSourceUV).r;
+    temp = mix(temp, advectedTemp, 0.06f / thermalMass * HEAT_SPREAD);  // thermal mass resists wind too
 
     // Direct text warmth: text melts ice immediately — your presence is fire
     if (solar > 0.03f) {
@@ -188,31 +212,38 @@ kernel void computeMain(
     float iceFactor = smoothstep(0.25f, 0.10f, temp) * smoothstep(0.1f, 0.4f, moisture);
     float albedo = mix(1.0f, 0.55f, iceFactor);
 
+    // Axial tilt — seasons
+    float seasonT = frame * 0.016f;
+    float tilt = sin(seasonT * 0.021f) * 0.12f;  // ±12% of screen, ~5min seasons
+    float latitude = abs(uv.y - 0.5f - tilt) * 2.0f;
+    latitude = clamp(latitude, 0.0f, 1.0f);
+
     // Day/night cycle — sun sweeps across the world
     float dayT = frame * 0.016f;
-    float sunX = sin(dayT * 0.08f) * 0.5f + 0.5f;  // sun x position [0,1], ~80s cycle
-    float daylight = 1.0f - smoothstep(0.0f, 0.45f, abs(uv.x - sunX));  // 1 at sun, 0 far away
-    daylight = daylight * 0.6f + 0.4f;  // night floor at 0.4 — never fully dark
+    float sunX = fract(dayT * 0.011f);
+    float sunDist = abs(uv.x - sunX);
+    sunDist = min(sunDist, 1.0f - sunDist);
+    float daylight = 1.0f - smoothstep(0.0f, 0.45f, sunDist);
+    daylight = daylight * 0.65f + 0.1f;  // night floor 0.1, noon 0.75
 
-    // Solar heating — modulated by albedo and daylight
+    // Solar heating — cosine law of insolation + tilt
+    // Winter pole gets almost no sun. Summer pole gets extra.
+    float incidence = max(cos(lat - tilt * 2.5f), 0.0f);
     float solarSmooth = solar > 0.05f ? solar : 0.0f;
-    temp += solarSmooth * SOLAR_STRENGTH * albedo * daylight;
+    temp += solarSmooth * SOLAR_STRENGTH * albedo * daylight * incidence;
 
     // Altitude cooling
     temp -= elev * ALTITUDE_COOL;
-
-    // Latitude cooling — screen edges are polar
-    float latitude = abs(uv.y - 0.5f) * 2.0f;  // 0 at equator, 1 at poles
-    temp -= latitude * latitude * 0.06f;          // gentle poles, lose up to 0.06
 
     // Biomass cooling (but also lowers albedo — dark vegetation absorbs heat)
     float bioAlbedo = 1.0f + biomass * 0.02f;  // vegetation absorbs slightly more
     temp -= biomass * BIOMASS_COOL;
     temp += biomass * solar * 0.002f;  // dark canopy absorbs what ice would reflect
 
-    // Radiative cooling toward ambient — Milankovitch ice age cycle
-    float ageT = frame * 0.016f;  // ~real seconds
-    float iceAge = sin(ageT * 0.015f) * 0.12f;  // ±0.12 swing, ~7min full cycle
+    // Radiative cooling toward ambient — latitude + Milankovitch ice age
+    float ageT = frame * 0.016f;
+    float iceAge = sin(ageT * 0.015f) * 0.07f;
+    // Radiative cooling — same everywhere, space doesn't care about latitude
     float ambient = AMBIENT_TEMP + iceAge;
     temp += (ambient - temp) * AMBIENT_COOL;
 
@@ -227,22 +258,7 @@ kernel void computeMain(
     float mAvg = (nL.g + nR.g + nU.g + nD.g) * 0.25f;
     moisture = mix(moisture, mAvg, MOISTURE_DIFFUSE);
 
-    // Temperature gradient → convective transport
-    // Warm areas push moisture outward; Coriolis deflects for circulation cells
-    float2 tempGrad = float2(nR.r - nL.r, nD.r - nU.r);
-    float2 convection = tempGrad * 0.08f;
-    // Coriolis deflection — creates circular cells instead of linear flow
-    convection += float2(-tempGrad.y, tempGrad.x) * 0.05f;
-
-    // Prevailing wind (slow planetary-scale drift)
-    float t = frame * 0.016f;
-    float2 wind = float2(
-        sin(t * 0.05f + uv.y * 3.0f) * WIND_STRENGTH,
-        cos(t * 0.07f + uv.x * 2.0f) * WIND_STRENGTH * 0.5f
-    );
-
     // Advect moisture along convection + wind
-    float2 transport = convection + wind;
     float2 sourceUV = uv - transport;
     float advectedMoisture = state_read.sample(smp, sourceUV).g;
     moisture = mix(moisture, advectedMoisture, 0.08f);
@@ -269,8 +285,8 @@ kernel void computeMain(
                   + max(elev - eR, 0.0f)
                   + max(elev - eU, 0.0f)
                   + max(elev - eD, 0.0f);
-    moisture += flowIn * 0.02f;
-    moisture -= flowOut * moisture * 0.01f;
+    moisture += flowIn * 0.04f;
+    moisture -= flowOut * moisture * 0.02f;
 
     // General drain: moisture escapes to atmosphere/groundwater
     // Biomass retains moisture (reduces drain, doesn't add moisture)
@@ -332,10 +348,11 @@ kernel void computeMain(
     // Erosion: proportional to flow concentration × slope
     // Concentrated flow carves; sheet flow doesn't
     float slopeStrength = max(flowOut, 0.0f);
-    float erosionRate = (flowConcentration * 0.5f + moisture * 0.5f)
-                      * slopeStrength * 0.00003f * soilStability;
+    float erosionRate = (flowConcentration * 0.6f + moisture * 0.4f)
+                      * slopeStrength * 0.00015f * soilStability;
 
-    float depositionRate = 0.0f;
+    // Deposition: eroded sediment settles in flat, low areas
+    float depositionRate = flowConcentration * smoothstep(0.01f, 0.0f, slopeStrength) * 0.00005f;
     float sedimentSmooth = 0.0f;
 
     // Tectonic uplift: reverse transverse mercator projection of text

@@ -5,10 +5,10 @@
 
 // ── Tuning ────────────────────────────────────────────────────────────────────
 #define HORIZON      0.28     // where ocean meets sky (0=bottom, 1=top)
-#define WAVE_HEIGHT  0.018    // swell amplitude
-#define CHOP         0.55     // steepness / choppiness
+#define WAVE_HEIGHT  0.024    // swell amplitude
+#define CHOP         0.78     // steepness / choppiness
 #define FOAM_STR     0.55     // whitecap brightness
-#define REFRACT_STR  0.022    // text distortion through surface
+#define REFRACT_STR  0.048    // text distortion through surface
 #define CYCLE_TIME   600.0    // seconds per full day (10 min)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -40,7 +40,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // phase: 0=midnight, 0.25=sunrise, 0.5=noon, 0.75=sunset, 1=midnight
     float phase    = fract(iTime / CYCLE_TIME);
     float sunAngle = phase * 6.28318 - 1.5708;  // sun arcs full circle
-    vec2  sunPos   = vec2(cos(sunAngle) * 0.7 + 0.5, HORIZON - sin(sunAngle) * 0.5);
+    vec2  sunPos   = vec2(cos(sunAngle) * 0.7 + 0.5, HORIZON * (0.12 + 0.84 * (1.0 - max(sin(sunAngle), 0.0))));
     float sunAbove = smoothstep(-0.05, 0.10, sin(sunAngle));  // 0=night, 1=day
     float sunset   = smoothstep(0.0, 0.18, sin(sunAngle)) * (1.0 - smoothstep(0.18, 0.55, sin(sunAngle)));
     float sunrise  = smoothstep(-0.05, 0.18, sin(sunAngle)) * (1.0 - smoothstep(0.18, 0.4, sin(sunAngle)));
@@ -69,6 +69,36 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float sunHalo = exp(-sunDist * sunDist * 80.0) * 0.35;
     vec3  sunCol  = mix(vec3(1.0, 0.85, 0.45), vec3(1.0, 0.98, 0.88), sunAbove);
     skyBase += sunCol * (sunDisc + sunHalo) * sunAbove;
+
+    // ── Moon — rises opposite sun, phase cycles over 4 days ──────────────
+    float moonAngle = sunAngle + 3.14159;               // opposite sun
+    vec2  moonPos   = vec2(cos(moonAngle) * 0.7 + 0.5, HORIZON * (0.12 + 0.84 * (1.0 - max(sin(moonAngle), 0.0))));
+    float moonPhase = fract(iTime / (CYCLE_TIME * 4.0) + 0.5); // offset so we start at full moon
+    float moonVis   = 1.0 - sunAbove;                   // fades with daylight
+
+    if (moonVis > 0.01 && moonPos.y > 0.0 && moonPos.y < HORIZON) {
+        float moonDist = length((uv - moonPos) * vec2(aspect, 1.0));
+        float moonDisc = smoothstep(0.028, 0.016, moonDist);
+
+        // Phase mask — offset sphere shadow
+        float phaseOffset = (moonPhase - 0.5) * 2.0;   // -1=new, 0=full, 1=new
+        vec2  moonLocal   = (uv - moonPos) * vec2(aspect, 1.0);
+        float shadow      = dot(normalize(vec2(phaseOffset, 0.0) + vec2(0.001)), moonLocal / 0.022);
+        float phaseMask   = smoothstep(-0.3, 0.3, shadow - phaseOffset * 0.6);
+
+        vec3 moonCol = vec3(0.88, 0.90, 0.78) * moonVis;
+        skyBase += moonCol * moonDisc * phaseMask;
+        skyBase += moonCol * 0.15 * exp(-moonDist * moonDist * 200.0) * moonVis; // halo
+    }
+
+    // ── Moonlight glitter — computed here, applied after waterCol ────────
+    float moonGlitter = 0.0;
+    if (moonVis > 0.01 && sin(moonAngle) > 0.0) {
+        float mGlitterX = abs(uv.x - moonPos.x) * aspect;
+        moonGlitter = exp(-mGlitterX * mGlitterX * 10.0)
+                    * smoothstep(HORIZON - 0.01, HORIZON + 0.01, uv.y)
+                    * moonVis;
+    }
 
     // ── Stars at night — rotate around pole star (top-center) ────────────
     float nightness = 1.0 - sunAbove;
@@ -129,12 +159,17 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float spec = pow(max(dot(N, H), 0.0), 120.0) * length(grad) * 8.0;
     waterCol  += lightCol * spec * mix(0.3, 0.9, sunAbove);
 
-    // ── Sun glitter — wave facets reflecting sun toward viewer ───────────
-    float glitterX  = abs(uv.x - sunPos.x) * aspect;
-    float pathMask  = exp(-glitterX * glitterX * 10.0) * smoothstep(horizon + 0.01, horizon - 0.01, uv.y);
-    vec3  sunRefl   = normalize(vec3(sunPos - uv, 0.5));
-    float facetCatch = pow(max(dot(N, normalize(sunRefl + vec3(0.0, 0.0, 1.0))), 0.0), 60.0);
+    // ── Sun glitter — perspective correct, narrows to point at horizon ────
+    float glitterX    = abs(uv.x - sunPos.x) * aspect;
+    float distFromHor = max(uv.y - horizon, 0.001);   // deeper = wider path
+    float perspWidth  = 14.0 / (distFromHor * 18.0 + 0.8);
+    float pathMask    = exp(-glitterX * glitterX * perspWidth) * smoothstep(horizon + 0.01, horizon - 0.01, uv.y);
+    vec3  sunRefl     = normalize(vec3(sunPos - uv, 0.5));
+    float facetCatch  = pow(max(dot(N, normalize(sunRefl + vec3(0.0, 0.0, 1.0))), 0.0), 60.0);
     waterCol += sunCol * pathMask * facetCatch * sunAbove * 2.5;
+
+    // ── Moonlight on water ────────────────────────────────────────────────
+    waterCol += vec3(0.55, 0.60, 0.50) * moonGlitter * 0.4 * (0.5 + 0.5 * dot(N, normalize(vec3(cos(moonAngle), 0.3, sin(moonAngle)))));
 
     // ── Foam ──────────────────────────────────────────────────────────────
     float foam = smoothstep(0.55, 0.85, waveH) * FOAM_STR;

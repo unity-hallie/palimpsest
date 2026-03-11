@@ -148,8 +148,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float textL = luma(term);
 
     // ── Water color — tinted by sky/light ────────────────────────────────
-    vec3 deepCol    = mix(vec3(0.01, 0.03, 0.10), vec3(0.02, 0.08, 0.18), sunAbove);
-    vec3 shallowCol = mix(vec3(0.02, 0.06, 0.18), vec3(0.04, 0.22, 0.32), sunAbove);
+    vec3 deepCol    = mix(vec3(0.01, 0.04, 0.06), vec3(0.02, 0.09, 0.10), sunAbove);
+    vec3 shallowCol = mix(vec3(0.02, 0.09, 0.10), vec3(0.05, 0.18, 0.14), sunAbove);
     deepCol    = mix(deepCol,    vec3(0.18, 0.06, 0.04), goldHour * 0.5);
     shallowCol = mix(shallowCol, vec3(0.28, 0.14, 0.06), goldHour * 0.4);
 
@@ -219,6 +219,22 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec3  color    = mix(waterCol, sky, surfMask);
     float textAlpha = textL * mix(0.5, 1.0, surfMask);
     color = mix(color, term + color * 0.2, textAlpha * 0.9);
+
+    // ── Depth haze — Beer-Lambert extinction + scatter, like ripple ──────────
+    if (uv.y > horizon) {
+        float depth = (uv.y - horizon) / (1.0 - horizon);  // 0=surface, 1=bottom
+
+        // Per-channel extinction: R absorbed first, B last → warm→cool with depth
+        vec3  sigma = vec3(3.8, 2.2, 1.0) * mix(0.6, 1.0, sunAbove);
+        vec3  T     = exp(-sigma * depth * depth);  // transmittance
+
+        // Scatter veil: grows with depth, tinted by water color
+        float scatter  = 1.0 - exp(-4.0 * depth * depth);
+        vec3  veilCol  = mix(shallowCol, deepCol, depth) * mix(0.3, 0.15, sunAbove);
+        veilCol        = mix(veilCol, vec3(0.18, 0.06, 0.04) * 0.3, goldHour * 0.5);
+
+        color = color * T + veilCol * scatter;
+    }
 
     // ── Focus dim ─────────────────────────────────────────────────────────
     float focusT   = clamp((iTime - iTimeFocus) * 1.5, 0.0, 1.0);

@@ -1,0 +1,205 @@
+// mycelium.compute.msl — competing chemotactic molds
+//
+// Species identity = hue, derived from terminal text color at nucleation.
+// Properties vary continuously with hue. Competition is passive — through
+// food scarcity, not aggression. No mutation: hue is exactly inherited.
+//
+// State (rgba16f):
+//   R = food       [0,1]   shared nutrient, diffuses from letter positions
+//   G = cell       0=empty, (0,0.5]=strand density, (0.5,1.0]=active tip
+//   B = heading    [0,1]   angle/2π
+//   A = hue        [0,1]   species color identity, exactly inherited
+
+#include <metal_stdlib>
+using namespace metal;
+
+// ── Parameters ───────────────────────────────────────────────────────────────
+constant float SENSOR_ANGLE  = 0.45f;
+constant float FORK_ANGLE    = 0.40f;
+constant float DIE_PROB      = 0.08f;
+constant float FOOD_BIAS     = 0.80f;
+constant float STEP_SIZE     = 2.5f;
+constant float REPLENISH     = 0.040f;
+constant float DIFFUSE_RATE  = 0.08f;
+constant float NUCLEATE_RATE = 0.000016f;
+constant float STRAND_DECAY  = 0.9975f;
+
+// ── Hue-derived species properties ───────────────────────────────────────────
+float spSensorDist(float h) { return 7.0f  + fract(h * 7.13f)  * 5.0f;   }  // 7–12
+float spForkProb(float h)   { return 0.010f + fract(h * 11.37f) * 0.020f; }  // 0.010–0.030
+float spWander(float h)     { return 0.04f  + fract(h * 5.71f)  * 0.07f;  }  // 0.04–0.11
+float spExtendProb(float h) { return 0.12f  + fract(h * 3.97f)  * 0.08f;  }  // 0.12–0.20
+float spEatAmount(float h)  { return 0.02f  + fract(h * 9.41f)  * 0.01f;  }  // 0.02–0.03
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+float hash21(float2 p) {
+    p = fract(p * float2(127.1f, 311.7f));
+    p += dot(p, p.yx + 19.19f);
+    return fract(p.x * p.y);
+}
+float hash3(float2 p, float salt) {
+    return hash21(p + float2(salt * 17.3f, salt * 31.1f));
+}
+
+float senseFood(
+    texture2d<float, access::sample> tex,
+    sampler smp, float2 uv, float2 px, float angle, float dist
+) {
+    float2 dir = float2(cos(angle), sin(angle));
+    return tex.sample(smp, clamp(uv + dir * dist * px, 0.001f, 0.999f)).r;
+}
+
+bool isTip(float g)    { return g > 0.5f; }
+bool isStrand(float g) { return g > 0.04f && g <= 0.5f; }
+bool isEmpty(float g)  { return g <= 0.04f; }
+
+// ── Kernel ───────────────────────────────────────────────────────────────────
+kernel void computeMain(
+    texture2d<float, access::sample> terminal    [[ texture(0) ]],
+    texture2d<float, access::sample> state_read  [[ texture(3) ]],
+    texture2d<float, access::write>  state_write [[ texture(8) ]],
+    uint2                            gid         [[ thread_position_in_grid ]]
+) {
+    uint W = state_write.get_width();
+    uint H = state_write.get_height();
+    if (gid.x >= W || gid.y >= H) return;
+
+    constexpr sampler smp(filter::linear, address::clamp_to_edge);
+    float2 uv = (float2(gid) + 0.5f) / float2(W, H);
+    float2 px = 1.0f / float2(W, H);
+
+    // ── Frame counter in pixel (0,0).r ────────────────────────────────────
+    float2 cornerUV = float2(0.5f / float(W), 0.5f / float(H));
+    if (gid.x == 0u && gid.y == 0u) {
+        float prev  = state_read.sample(smp, cornerUV).r;
+        float frame = fmod(prev + 1.0f, 100000.0f);
+        state_write.write(float4(frame, 0.0f, 0.0f, 0.0f), gid);
+        return;
+    }
+
+    float frame = state_read.sample(smp, cornerUV).r;
+
+    // ── Entropy ───────────────────────────────────────────────────────────
+    float frameSeed = fract(frame * 0.61803398f);  // golden ratio — aperiodic
+    float sRng1 = hash21(float2(gid) * 0.017f);    // stable: binary die decision
+    float sRng3 = hash21(float2(gid) * 0.053f);    // stable: binary fork decision
+    float rng2  = hash3(float2(gid) * 0.031f, frameSeed * 13.7f);  // wander
+
+    // ── Read state ────────────────────────────────────────────────────────
+    float4 cur     = state_read.sample(smp, uv);
+    float  food    = cur.r;
+    float  cell    = cur.g;
+    float  heading = cur.b * M_PI_F * 2.0f;
+    float  hue     = cur.a;
+
+    // ── Bootstrap ─────────────────────────────────────────────────────────
+    if (frame < 3.0f) {
+        state_write.write(float4(1.0f, 0.0f, 0.0f, 0.0f), gid);
+        return;
+    }
+
+    // ── Terminal sample (shared by food drip and nucleation) ──────────────
+    float3 termColor = terminal.sample(smp, uv).rgb;
+    float  termLuma  = dot(termColor, float3(0.299f, 0.587f, 0.114f));
+
+    // ── Food replenishment + diffusion ────────────────────────────────────
+    float textDrip = termLuma > 0.1f ? 0.006f : 0.0f;
+    float newFood  = min(1.0f, food + REPLENISH + textDrip);
+    float fN = state_read.sample(smp, clamp(uv + float2(0.0f,  px.y), 0.001f, 0.999f)).r;
+    float fS = state_read.sample(smp, clamp(uv - float2(0.0f,  px.y), 0.001f, 0.999f)).r;
+    float fE = state_read.sample(smp, clamp(uv + float2(px.x,  0.0f), 0.001f, 0.999f)).r;
+    float fW = state_read.sample(smp, clamp(uv - float2(px.x,  0.0f), 0.001f, 0.999f)).r;
+    newFood = mix(newFood, (fN + fS + fE + fW) * 0.25f, DIFFUSE_RATE);
+
+    float newCell    = isStrand(cell) ? cell * STRAND_DECAY : (isTip(cell) ? cell : 0.0f);
+    float newHeading = heading;
+    float newHue     = hue;
+
+    // ── If I am a tip: act ────────────────────────────────────────────────
+    // Kill tips at edges — clamp_to_edge creates false food signal at walls
+    float edgeDist = min(min(uv.x, 1.0f - uv.x), min(uv.y, 1.0f - uv.y));
+    if (isTip(cell) && edgeDist < 0.015f) {
+        newCell = 0.45f;
+    }
+
+    if (isTip(cell)) {
+        newFood = max(0.0f, newFood - spEatAmount(hue));
+        newCell = 0.45f;
+        float newTip = 0.0f;
+
+        if (sRng1 > DIE_PROB) {
+            float sd     = spSensorDist(hue);
+            float fFwd   = senseFood(state_read, smp, uv, px, heading,                sd);
+            float fLeft  = senseFood(state_read, smp, uv, px, heading + SENSOR_ANGLE, sd);
+            float fRight = senseFood(state_read, smp, uv, px, heading - SENSOR_ANGLE, sd);
+
+            float turn = 0.0f;
+            if (fLeft > fRight && fLeft > fFwd)       turn = +SENSOR_ANGLE * FOOD_BIAS;
+            else if (fRight > fLeft && fRight > fFwd) turn = -SENSOR_ANGLE * FOOD_BIAS;
+
+            newHeading = heading + turn + (rng2 - 0.5f) * 2.0f * spWander(hue);
+            newTip     = (sRng3 < spForkProb(hue)) ? 0.6f : 0.8f;
+        }
+
+        newCell = isTip(float(newTip)) ? newTip : 0.45f;
+    }
+
+    // ── Cell ahead picking up tip signal ─────────────────────────────────
+    if (!isStrand(cell) && !isTip(cell)) {
+        float2 myGid = float2(gid);
+        for (int dy = -3; dy <= 3; dy++) {
+            for (int dx = -3; dx <= 3; dx++) {
+                if (dx == 0 && dy == 0) continue;
+                float2 nGid = myGid + float2(float(dx), float(dy));
+                if (nGid.x < 0 || nGid.y < 0 || nGid.x >= float(W) || nGid.y >= float(H)) continue;
+                float2 nUV = (nGid + 0.5f) / float2(W, H);
+                float4 nb  = state_read.sample(smp, nUV);
+                if (!isTip(nb.g)) continue;
+
+                float2 toMe     = myGid - nGid;
+                float  dist     = length(toMe);
+                if (dist < STEP_SIZE - 0.7f || dist > STEP_SIZE + 0.7f) continue;
+
+                float nbAngle   = nb.b * M_PI_F * 2.0f;
+                float angleToMe = atan2(toMe.y, toMe.x);
+                float angleDiff = abs(fract((angleToMe - nbAngle) / (M_PI_F * 2.0f) + 0.5f) - 0.5f)
+                                  * M_PI_F * 2.0f;
+                if (angleDiff > 0.25f) continue;
+
+                float nbHue  = nb.a;
+                float extRng = fract(hash21(myGid * 0.019f + float2(nbHue * 73.1f, dist * 17.3f)) + frameSeed);
+
+                if (extRng < spExtendProb(nbHue)) {
+                    float rngN = hash3(myGid * 0.019f, frameSeed * 41.3f);
+                    newHue     = nbHue;
+                    newCell    = 0.75f;
+                    newHeading = nbAngle + (rngN - 0.5f) * 2.0f * spWander(nbHue);
+
+                    if (nb.g > 0.55f && nb.g < 0.75f) {
+                        float forkRng = hash3(myGid * 0.073f, frameSeed * 59.1f);
+                        newHeading = nbAngle
+                            + (forkRng > 0.5f ? FORK_ANGLE : -FORK_ANGLE)
+                            + (rngN - 0.5f) * 2.0f * spWander(nbHue);
+                    }
+                }
+                break;
+            }
+            if (isTip(newCell)) break;
+        }
+    }
+
+    // ── Text-seeded nucleation ────────────────────────────────────────────
+    if (isEmpty(newCell) && termLuma > 0.12f && newFood > 0.4f) {
+        float nucleateRng = hash3(float2(gid) * 0.091f, frameSeed * 97.3f);
+        if (nucleateRng < NUCLEATE_RATE) {
+            float cr      = termColor.r - (termColor.g + termColor.b) * 0.5f;
+            float cg      = (termColor.g - termColor.b) * 0.866f;
+            newHue        = fract(atan2(cg, cr) / (M_PI_F * 2.0f) + 1.0f);
+            newCell       = 0.75f;
+            newHeading    = hash3(float2(gid) * 0.13f, frameSeed * 71.1f) * M_PI_F * 2.0f;
+        }
+    }
+
+    float headingPacked = fmod(newHeading + M_PI_F * 4.0f, M_PI_F * 2.0f) / (M_PI_F * 2.0f);
+    state_write.write(float4(newFood, newCell, headingPacked, newHue), gid);
+}

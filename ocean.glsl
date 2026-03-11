@@ -9,7 +9,7 @@
 #define CHOP         0.55     // steepness / choppiness
 #define FOAM_STR     0.55     // whitecap brightness
 #define REFRACT_STR  0.022    // text distortion through surface
-#define CYCLE_TIME   180.0    // seconds per full day (3 min)
+#define CYCLE_TIME   600.0    // seconds per full day (10 min)
 // ─────────────────────────────────────────────────────────────────────────────
 
 float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
@@ -70,12 +70,17 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec3  sunCol  = mix(vec3(1.0, 0.85, 0.45), vec3(1.0, 0.98, 0.88), sunAbove);
     skyBase += sunCol * (sunDisc + sunHalo) * sunAbove;
 
-    // ── Stars at night ────────────────────────────────────────────────────
+    // ── Stars at night — rotate around pole star (top-center) ────────────
     float nightness = 1.0 - sunAbove;
     if (nightness > 0.01 && uv.y < HORIZON) {
-        vec2 starUV = uv * vec2(aspect * 60.0, 60.0);
-        vec2 starCell = floor(starUV);
-        vec2 starFrac = fract(starUV);
+        float starAngle = iTime / CYCLE_TIME * 6.28318; // one full rotation per day
+        vec2  pole      = vec2(0.5, 0.0);               // pole star at top-center
+        vec2  d         = uv - pole;
+        float c = cos(starAngle), s = sin(starAngle);
+        vec2  rotUV     = pole + vec2(d.x*c - d.y*s, d.x*s + d.y*c);
+        vec2  starUV    = rotUV * vec2(aspect * 60.0, 60.0);
+        vec2  starCell  = floor(starUV);
+        vec2  starFrac  = fract(starUV);
         float h = fract(sin(dot(starCell, vec2(127.1, 311.7))) * 43758.5);
         if (h > 0.88) {
             float star = exp(-length(starFrac - 0.5) * length(starFrac - 0.5) * 120.0);

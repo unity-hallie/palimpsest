@@ -1,0 +1,111 @@
+// putty.compute.msl — viscoelastic silly putty
+//
+// State texture (rgba16f):
+//   R = density        [0,1]   — how much putty is here
+//   G = velocity X     [-1,1]
+//   B = velocity Y     [-1,1]
+//   A = stress         [0,1]   — local strain magnitude, drives iridescence
+//
+// Physics: gravity pools putty at bottom. Text repels it.
+// High viscosity, slow elastic restoring, surface tension cohesion.
+
+#include <metal_stdlib>
+using namespace metal;
+
+#define DISSIPATION      0.9993f
+#define VEL_DECAY        0.86f
+#define VEL_DIFFUSE      0.82f
+#define GRAVITY          0.007f
+#define INJECT           0.0018f
+#define SURFACE_TENSION  0.14f
+#define TEXT_REPEL       0.07f
+#define STRESS_DECAY     0.94f
+
+static float hash21(float2 p) {
+    p = fract(p * float2(127.1f, 311.7f));
+    p += dot(p, p.yx + 19.19f);
+    return fract(p.x * p.y);
+}
+
+static float lumaF(float3 c) {
+    return dot(c, float3(0.299f, 0.587f, 0.114f));
+}
+
+kernel void computeMain(
+    texture2d<float, access::sample> terminal    [[ texture(0) ]],
+    texture2d<float, access::sample> feedback    [[ texture(2) ]],
+    texture2d<float, access::sample> state_read  [[ texture(3) ]],
+    texture2d<float, access::write>  state_write [[ texture(8) ]],
+    uint2 gid [[ thread_position_in_grid ]]
+) {
+    uint W = state_write.get_width();
+    uint H = state_write.get_height();
+    if (gid.x >= W || gid.y >= H) return;
+
+    constexpr sampler smp(filter::linear, address::clamp_to_edge);
+    float2 uv = (float2(gid) + 0.5f) / float2(W, H);
+    float2 px = 1.0f / float2(W, H);
+
+    // ── Time counter in corner pixel ──────────────────────────────────────
+    float2 cornerUV = float2(0.5f / float(W), 0.5f / float(H));
+    float prevTime = state_read.sample(smp, cornerUV).g;
+    float t = fmod(prevTime + 0.016f, 100.0f);
+    if (gid.x == 0u && gid.y == 0u) {
+        float4 corner = state_read.sample(smp, cornerUV);
+        state_write.write(float4(corner.r, t, corner.b, corner.a), gid);
+        return;
+    }
+
+    float4 st      = state_read.sample(smp, uv);
+    float  density = st.r;
+    float2 vel     = float2(st.g, st.b);
+    float  stress  = st.a;
+
+    // ── Neighbors ─────────────────────────────────────────────────────────
+    float4 nL = state_read.sample(smp, uv + float2(-px.x, 0));
+    float4 nR = state_read.sample(smp, uv + float2( px.x, 0));
+    float4 nU = state_read.sample(smp, uv + float2(0, -px.y));
+    float4 nD = state_read.sample(smp, uv + float2(0,  px.y));
+
+    // ── Velocity diffusion (viscosity) ────────────────────────────────────
+    float2 vAvg = (float2(nL.g, nL.b) + float2(nR.g, nR.b)
+                +  float2(nU.g, nU.b) + float2(nD.g, nD.b)) * 0.25f;
+    vel = mix(vel, vAvg, VEL_DIFFUSE);
+
+    // ── Gravity (pulls down — uv.y=1 is top, uv.y=0 is bottom) ──────────
+    vel.y -= GRAVITY;
+
+    // ── Surface tension — cohesion toward density gradient ────────────────
+    float2 densGrad = float2(nR.r - nL.r, nD.r - nU.r);
+    vel += densGrad * SURFACE_TENSION * density;
+
+    // ── Text repulsion ────────────────────────────────────────────────────
+    float lumaC = lumaF(terminal.sample(smp, uv).rgb);
+    float lumaL = lumaF(terminal.sample(smp, uv + float2(-px.x * 2.0f, 0)).rgb);
+    float lumaR = lumaF(terminal.sample(smp, uv + float2( px.x * 2.0f, 0)).rgb);
+    float lumaUt = lumaF(terminal.sample(smp, uv + float2(0, -px.y * 2.0f)).rgb);
+    float lumaD = lumaF(terminal.sample(smp, uv + float2(0,  px.y * 2.0f)).rgb);
+    float2 textGrad = float2(lumaR - lumaL, lumaD - lumaUt);
+    vel += textGrad * TEXT_REPEL;
+
+    // ── Velocity decay (friction) ─────────────────────────────────────────
+    vel *= VEL_DECAY;
+
+    // ── Advection ─────────────────────────────────────────────────────────
+    float2 backUV = uv - vel * 1.2f;
+    float4 advected = state_read.sample(smp, backUV);
+    float newDensity = advected.r;
+
+    // ── Dissipation + injection — only feed from bottom, text clears ──────
+    newDensity *= DISSIPATION;
+    if (uv.y < 0.12f) newDensity += INJECT * (1.0f - lumaC * 2.0f);
+    newDensity *= (1.0f - lumaC * 0.5f);
+    newDensity = clamp(newDensity, 0.0f, 1.0f);
+
+    // ── Stress — tracks local deformation for iridescence ────────────────
+    float strain = length(densGrad) * 8.0f + length(vel) * 4.0f;
+    stress = mix(advected.a * STRESS_DECAY, strain, 0.08f);
+    stress = clamp(stress, 0.0f, 1.0f);
+
+    state_write.write(float4(newDensity, vel.x, vel.y, stress), gid);
+}

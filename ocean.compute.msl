@@ -188,9 +188,10 @@ kernel void computeMain(
     float2 latVel = vel - fwdVel;
     vel = fwdVel * DAMP_FORWARD + latVel * DAMP_LATERAL + steer;
 
-    // Speed clamp
+    // Speed clamp — each fish has a personal max (0.6x–1.4x)
+    float speedScale = 0.6f + hash21(float2(fi * 5.9f, 2.3f)) * 0.8f;
     spd = length(vel);
-    if (spd > MAX_SPEED) vel = vel / spd * MAX_SPEED;
+    if (spd > MAX_SPEED * speedScale) vel = vel / spd * MAX_SPEED * speedScale;
     if (spd < MIN_SPEED && spd > 0.00001f) vel = vel / spd * MIN_SPEED;
 
     pos += vel;

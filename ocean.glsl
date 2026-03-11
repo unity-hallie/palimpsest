@@ -1,7 +1,8 @@
-// ocean.glsl — rolling ocean swells with day/night cycle
+// ocean.glsl — rolling ocean swells with day/night cycle + boid fish school
 //
 // iChannel0 = terminal content
-// No compute needed — Gerstner waves are analytic.
+// iChannel2 = fish boid state (ocean.compute.msl)
+//             row 0, pixel i: (posX, posY, velX, velY) for fish i
 
 // ── Tuning ────────────────────────────────────────────────────────────────────
 #define HORIZON      0.28     // where ocean meets sky (0=bottom, 1=top)
@@ -10,6 +11,7 @@
 #define FOAM_STR     0.55     // whitecap brightness
 #define REFRACT_STR  0.048    // text distortion through surface
 #define CYCLE_TIME   600.0    // seconds per full day (10 min)
+#define NUM_FISH     32      // boid fish (matches ocean.compute.msl)
 // ─────────────────────────────────────────────────────────────────────────────
 
 float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
@@ -179,6 +181,38 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // ── Fresnel reflection of sky ─────────────────────────────────────────
     float fresnel = pow(1.0 - max(dot(N, vec3(0.0, 0.0, 1.0)), 0.0), 3.0);
     waterCol = mix(waterCol, sky * 0.7, fresnel * 0.45);
+
+    // ── Fish school — silhouettes in the water ────────────────────────────
+    float fishShadow = 0.0;
+    if (uv.y > horizon) for (int i = 0; i < NUM_FISH; i++) {
+        vec2  fUV  = vec2((float(i) + 0.5) / iResolution.x, 0.5 / iResolution.y);
+        vec4  fSt  = texture(iChannel2, fUV);
+        vec2  fPos = fSt.rg;
+        vec2  fVel = fSt.ba;
+
+        if (fPos.y < HORIZON + 0.01) continue;  // uninitialized
+
+        // Fish-local coordinate space
+        // Aspect-correct both d and the heading so nose points where fish moves
+        vec2  d    = vec2((uv.x - fPos.x) * aspect, uv.y - fPos.y);
+        vec2  headScreen = length(fVel) > 0.00001
+                         ? normalize(vec2(fVel.x * aspect, fVel.y))
+                         : vec2(1.0, 0.0);
+        float bodyL = 0.011;
+        // Tail at fPos — body extends forward: shift lx so lx=0 is mid-body
+        float lx   = ( d.x * headScreen.x + d.y * headScreen.y) - bodyL;
+        float ly   = (-d.x * headScreen.y + d.y * headScreen.x);
+
+        // Tapered body: wide at shoulder, pointed at nose and tail
+        float taper = smoothstep(bodyL * 0.6, -bodyL * 0.8, lx);  // fatter toward front
+        float bodyW = 0.0018 + taper * 0.0014;
+        float fishD = length(vec2(lx / bodyL, ly / bodyW));
+        fishShadow = max(fishShadow, smoothstep(1.0, 0.7, fishD));
+    }
+
+    // Shadow: subtle silhouette
+    vec3 shadowCol = waterCol * 0.35 + vec3(0.01, 0.02, 0.04);
+    waterCol = mix(waterCol, shadowCol, fishShadow * 0.45);
 
     // ── Composite ─────────────────────────────────────────────────────────
     float surfMask = smoothstep(horizon + 0.01, horizon - 0.01, uv.y);

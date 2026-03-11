@@ -16,19 +16,20 @@ using namespace metal;
 // ── Parameters ───────────────────────────────────────────────────────────────
 constant float SENSOR_ANGLE  = 0.45f;
 constant float FORK_ANGLE    = 0.40f;
-constant float DIE_PROB      = 0.08f;
+constant float DIE_PROB      = 0.18f;
 constant float FOOD_BIAS     = 0.80f;
 constant float STEP_SIZE     = 2.5f;
 constant float REPLENISH     = 0.040f;
 constant float DIFFUSE_RATE  = 0.08f;
-constant float NUCLEATE_RATE = 0.000016f;
+constant float NUCLEATE_RATE = 0.000008f;
 constant float STRAND_DECAY  = 0.9975f;
+constant float MUTATION_RATE = 0.012f;
 
 // ── Hue-derived species properties ───────────────────────────────────────────
 float spSensorDist(float h) { return 7.0f  + fract(h * 7.13f)  * 5.0f;   }  // 7–12
-float spForkProb(float h)   { return 0.010f + fract(h * 11.37f) * 0.020f; }  // 0.010–0.030
+float spForkProb(float h)   { return 0.006f + fract(h * 11.37f) * 0.010f; }  // 0.006–0.016
 float spWander(float h)     { return 0.04f  + fract(h * 5.71f)  * 0.07f;  }  // 0.04–0.11
-float spExtendProb(float h) { return 0.12f  + fract(h * 3.97f)  * 0.08f;  }  // 0.12–0.20
+float spExtendProb(float h) { return 0.07f  + fract(h * 3.97f)  * 0.05f;  }  // 0.07–0.12
 float spEatAmount(float h)  { return 0.02f  + fract(h * 9.41f)  * 0.01f;  }  // 0.02–0.03
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -103,8 +104,7 @@ kernel void computeMain(
     float  termLuma  = dot(termColor, float3(0.299f, 0.587f, 0.114f));
 
     // ── Food replenishment + diffusion ────────────────────────────────────
-    float textDrip = termLuma > 0.1f ? 0.006f : 0.0f;
-    float newFood  = min(1.0f, food + REPLENISH + textDrip);
+    float newFood  = min(1.0f, food + REPLENISH);
     float fN = state_read.sample(smp, clamp(uv + float2(0.0f,  px.y), 0.001f, 0.999f)).r;
     float fS = state_read.sample(smp, clamp(uv - float2(0.0f,  px.y), 0.001f, 0.999f)).r;
     float fE = state_read.sample(smp, clamp(uv + float2(px.x,  0.0f), 0.001f, 0.999f)).r;
@@ -167,11 +167,12 @@ kernel void computeMain(
                 if (angleDiff > 0.25f) continue;
 
                 float nbHue  = nb.a;
-                float extRng = fract(hash21(myGid * 0.019f + float2(nbHue * 73.1f, dist * 17.3f)) + frameSeed);
+                float extRng = hash21(myGid * 0.019f + float2(nbHue * 73.1f, dist * 17.3f));
 
                 if (extRng < spExtendProb(nbHue)) {
                     float rngN = hash3(myGid * 0.019f, frameSeed * 41.3f);
-                    newHue     = nbHue;
+                    float mutRng = hash3(myGid * 0.037f, frameSeed * 83.7f);
+                    newHue     = fract(nbHue + (mutRng - 0.5f) * 2.0f * MUTATION_RATE + 1.0f);
                     newCell    = 0.75f;
                     newHeading = nbAngle + (rngN - 0.5f) * 2.0f * spWander(nbHue);
 

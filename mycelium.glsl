@@ -48,10 +48,5 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec3 color = base + strandCol;
     color *= 1.0 - VIGNETTE * pow(length((uv - 0.5) * vec2(1.0, 0.85)), 2.2);
 
-    // ── Temporal smoothing — gated by text presence ───────────────────────
-    vec3  prev      = texture(iChannel1, uv).rgb;
-    float blendRate = mix(0.18, 0.55, smoothstep(0.05, 0.3, textL));
-    color = mix(prev, color, blendRate);
-
     fragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
 }

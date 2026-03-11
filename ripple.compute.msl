@@ -21,6 +21,7 @@ using namespace metal;
 #define PLASTICITY   0.18f    // peak retention: settled regions resist restoring force
 #define CURRENT_STR  0.000f   // convection field magnitude
 #define UNDERTOW     float2(0.0000f, 0.0000f)   // persistent directional drift
+#define CORIOLIS     0.018f   // rotational deflection of wave velocity
 // ─────────────────────────────────────────────────────────────────────────────
 
 static float hash21(float2 p) {
@@ -94,8 +95,13 @@ kernel void computeMain(
     float moving    = smoothstep(0.0f, 0.008f, abs(vel));
     float restoring = mix(1.0f - PLASTICITY, 1.0f, moving);
 
+    // ── Coriolis deflection — rotates wave propagation ───────────────────────
+    float2 grad = float2(uR - uL, uD - uU);
+    float2 coriolis = float2(-grad.y, grad.x) * CORIOLIS;
+
     // ── Wave equation: u_new = 2u - u_old + c²∇²u - γ(u - u_old) ────────────
-    float u_new = 2.0f*u - u_old + WAVE_SPEED * lap * restoring - damp * vel;
+    float u_new = 2.0f*u - u_old + WAVE_SPEED * lap * restoring - damp * vel
+                + (coriolis.x + coriolis.y) * WAVE_SPEED;
 
     // ── Impulse from terminal content changes ─────────────────────────────────
     float3 termNow  = terminal.sample(smp, uv).rgb;

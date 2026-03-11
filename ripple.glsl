@@ -13,7 +13,7 @@
 #define EXTINCTION   18.0    // Beer-Lambert σ: controls how fast light dies
 #define SCATTER      5.5     // scatter coefficient: dusty veil thickness
 #define BLOOM_STR    0.55    // bloom intensity multiplier
-#define REFRACT_STR  0.0016  // refraction offset strength
+#define REFRACT_STR  0.0048  // refraction offset strength
 #define SPEC_STR     0.22    // specular highlight intensity
 #define VIGNETTE     0.28    // edge darkening
 // ─────────────────────────────────────────────────────────────────────────────

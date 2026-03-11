@@ -2,16 +2,15 @@
 //
 // iChannel0 = terminal content
 // iChannel2 = smoke state (R=density, G=velX, B=velY, A=smoothed energy)
-//
-// Tunable heat colors, focus dim/desaturate on unfocused windows.
 
 // ── Tuning ────────────────────────────────────────────────────────────────────
-#define NEON_STRENGTH   0.6
-#define HEAT_GLOW       1.9
-#define HEAT_COLOR_LO   vec3(0.6, 0.2, 0.05)
-#define HEAT_COLOR_HI   vec3(1.0, 0.75, 0.45)
-#define SMOKE_NEON      0.8
-#define SMOKE_OPACITY   0.25
+#define NEON_STRENGTH   1.1
+#define RAY_STRENGTH    2.5
+#define HEAT_GLOW       2.8
+#define HEAT_COLOR_LO   vec3(0.04, 0.12, 0.55)
+#define HEAT_COLOR_HI   vec3(0.30, 0.60, 1.00)
+#define SMOKE_NEON      1.2
+#define SMOKE_OPACITY   0.40
 #define VIGNETTE        0.00
 #define MOON_BRIGHTNESS 0.5
 #define MOON_SIZE       0.10
@@ -71,9 +70,25 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // ── Text dimmed by scattering ─────────────────────────────────────────
     float scatter = density * textBright;
     vec3 color = term * (1.0 - scatter * 0.4);
+    // Boost text contrast so it reads through smoke
+    color += term * textBright * 0.6;
 
-    // ── Smoke: neon + text scatter + energy heat ──────────────────────────
-    vec3 smokeColor = neonColor * density * SMOKE_NEON;
+    // ── Gaussian neon haze — soft bloom beyond the smoke body ─────────────
+    vec2 px = 1.0 / iResolution.xy;
+    float r1 = 4.0, r2 = 9.0;
+    float hazeDensity =
+        density                                                            * 0.30 +
+        texture(iChannel2, uv + vec2( r1,  0.0) * px).r                   * 0.12 +
+        texture(iChannel2, uv + vec2(-r1,  0.0) * px).r                   * 0.12 +
+        texture(iChannel2, uv + vec2( 0.0,  r1) * px).r                   * 0.12 +
+        texture(iChannel2, uv + vec2( 0.0, -r1) * px).r                   * 0.12 +
+        texture(iChannel2, uv + vec2( r2,  r2 ) * px).r                   * 0.04 +
+        texture(iChannel2, uv + vec2(-r2,  r2 ) * px).r                   * 0.04 +
+        texture(iChannel2, uv + vec2( r2, -r2 ) * px).r                   * 0.04 +
+        texture(iChannel2, uv + vec2(-r2, -r2 ) * px).r                   * 0.04;
+
+    // ── Smoke: neon haze + text scatter + energy heat ────────────────────
+    vec3 smokeColor = neonColor * hazeDensity * SMOKE_NEON;
     // Text light scattered into smoke
     smokeColor += term * density * textBright * 0.2;
     // Energy heat glow — ember to warm white, smooth and stable
@@ -81,15 +96,36 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec3 heatTint = mix(HEAT_COLOR_LO, HEAT_COLOR_HI, h);
     smokeColor += heatTint * density * energy * HEAT_GLOW;
 
-    // ── Moon (base layer, behind smoke) ─────────────────────────────────
+    // ── God rays — text light shafting through smoke ──────────────────────
+    vec3 godRays = vec3(0.0);
+    float rayStep = 0.026;
+    float rayDecay = 0.84;
+    for (int i = 0; i < 12; i++) {
+        float angle = float(i) * 0.5236; // 30° apart
+        vec2 dir = vec2(cos(angle), sin(angle));
+        float w = 1.0;
+        for (int j = 1; j <= 6; j++) {
+            vec2 sUV = clamp(uv + dir * float(j) * rayStep, 0.001, 0.999);
+            float sBright = luma(texture(iChannel0, sUV).rgb);
+            float sDens   = texture(iChannel2, sUV).r;
+            godRays += neonColor * sBright * sDens * w;
+            w *= rayDecay;
+        }
+    }
+    godRays /= 72.0;
+
+    // ── Background layers (behind smoke) ────────────────────────────────
     color += moonColor * moonMask * moonHaze;
+    color += neonColor * NEON_STRENGTH * 0.12;
 
-    // ── Edge neon wash (base layer, under smoke) ────────────────────────
-    color += neonColor * NEON_STRENGTH * 0.10;
+    // ── Smoke absorption — thick smoke darkens background ────────────────
+    float absorption = smoothstep(0.2, 0.9, density);
+    color *= 1.0 - absorption * 0.42;
 
-    // ── Composite smoke over everything ───────────────────────────────────
-    float fog = smoothstep(0.0, 0.4, density) * SMOKE_OPACITY;
+    // ── Scatter neon back through the haze (backlit volumetric) ──────────
+    float fog = smoothstep(0.05, 0.7, hazeDensity) * SMOKE_OPACITY;
     color = mix(color, smokeColor, fog);
+    color += godRays * RAY_STRENGTH;
 
     // ── Focus dim ─────────────────────────────────────────────────────────
     float focusT = clamp((iTime - iTimeFocus) * 1.5, 0.0, 1.0);

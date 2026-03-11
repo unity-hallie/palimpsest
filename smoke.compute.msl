@@ -15,11 +15,11 @@
 #include <metal_stdlib>
 using namespace metal;
 
-#define DISSIPATION    0.993f
+#define DISSIPATION    0.991f
 #define VEL_DECAY      0.95f
-#define VEL_DIFFUSE    0.65f
-#define BUOYANCY       0.005f
-#define SMOKE_INJECT   0.005f
+#define VEL_DIFFUSE    0.60f
+#define BUOYANCY       0.003f
+#define SMOKE_INJECT   0.004f
 
 static float hash21(float2 p) {
     p = fract(p * float2(127.1f, 311.7f));
@@ -97,15 +97,24 @@ kernel void computeMain(
                 +  float2(nU.g, nU.b) + float2(nD.g, nD.b)) * 0.25f;
     vel = mix(vel, vAvg, VEL_DIFFUSE);
 
-    // ── Brownian motion (ramped by energy — builds gradually) ─────────────
+    // ── Brownian motion — low-freq for big slow Blade Runner billows ──────
     float agitation = luma * (1.0f + energy * 6.0f);
-    vel += curlNoise(uv * 120.0f, t * 3.0f) * agitation * 0.018f;
-    vel += curlNoise(uv * 50.0f,  t * 1.5f) * agitation * 0.028f;
-    vel += curlNoise(uv * 20.0f,  t * 0.5f) * agitation * 0.012f;
+    vel += curlNoise(uv * 40.0f,  t * 1.0f) * agitation * 0.030f;
+    vel += curlNoise(uv * 15.0f,  t * 0.4f) * agitation * 0.040f;
+    vel += curlNoise(uv *  6.0f,  t * 0.2f) * agitation * 0.018f;
 
     // ── Energy gradient → expansion force ────────────────────────────────
     float2 energyGrad = float2(nR.a - nL.a, nD.a - nU.a);
     vel += energyGrad * 0.05f;
+
+    // ── Text heat — bright letters burn and push smoke outward ───────────
+    float lumaL2 = lumaF(terminal.sample(smp, uv + float2(-px.x * 2.0f, 0)).rgb);
+    float lumaR2 = lumaF(terminal.sample(smp, uv + float2( px.x * 2.0f, 0)).rgb);
+    float lumaU2 = lumaF(terminal.sample(smp, uv + float2(0, -px.y * 2.0f)).rgb);
+    float lumaD2 = lumaF(terminal.sample(smp, uv + float2(0,  px.y * 2.0f)).rgb);
+    float2 textGrad = float2(lumaR2 - lumaL2, lumaD2 - lumaU2);
+    vel += textGrad * 0.30f;
+    newDensity *= (1.0f - lumaC * 0.75f);
 
     // ── Radial expansion ──────────────────────────────────────────────────
     float2 toEdge = (uv - 0.5f) * 2.0f;
@@ -152,8 +161,8 @@ kernel void computeMain(
     // ── Dissipation ───────────────────────────────────────────────────────
     newDensity *= DISSIPATION;
 
-    // ── Smoke injection ───────────────────────────────────────────────────
-    newDensity += SMOKE_INJECT;
+    // ── Smoke injection — text burns through, clearing around letters ─────
+    newDensity += SMOKE_INJECT * (1.0f - luma * 2.5f);
     newDensity = clamp(newDensity, 0.0f, 1.0f);
 
     // ── Smoothed energy: advect + spatial diffuse + temporal EMA ──────────

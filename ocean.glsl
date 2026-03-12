@@ -5,7 +5,9 @@
 //             row 0, pixel i: (posX, posY, velX, velY) for fish i
 
 // ── Tuning ────────────────────────────────────────────────────────────────────
-#define HORIZON      0.28     // where ocean meets sky (0=bottom, 1=top)
+#define HORIZON      0.50     // midtide horizon (0=bottom, 1=top)
+#define TIDE_AMP     0.17     // tidal range ±17% → high tide ~0.67, low tide ~0.33
+#define TIDE_TIME    180.0    // seconds per full tidal cycle (3 min)
 #define WAVE_HEIGHT  0.014    // swell amplitude
 #define CHOP         0.52     // steepness / choppiness
 #define FOAM_STR     0.55     // whitecap brightness
@@ -38,6 +40,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 px    = 1.0 / iResolution.xy;
     float aspect = iResolution.x / iResolution.y;
 
+    // ── Tidal cycle — water line moves between low tide (~0.33) and high tide (~0.67)
+    float tideH = HORIZON + sin(iTime * 6.28318 / TIDE_TIME) * TIDE_AMP;
+
     // ── Day cycle ─────────────────────────────────────────────────────────
     // phase: 0=midnight, 0.25=sunrise, 0.5=noon, 0.75=sunset, 1=midnight
     float phase    = fract(iTime / CYCLE_TIME);
@@ -61,7 +66,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     skyBase = mix(skyNight, skyBase, sunAbove);
 
     // Golden hour wash near horizon
-    float horizonGlow = smoothstep(0.25, 0.0, abs(uv.y - HORIZON - 0.02));
+    float horizonGlow = smoothstep(0.25, 0.0, abs(uv.y - tideH - 0.02));
     skyBase = mix(skyBase, mix(skySunset, skyDusk, smoothstep(0.0, 1.0, phase > 0.5 ? (phase - 0.75) * 4.0 + 0.5 : 0.0)), goldHour * horizonGlow * 1.8);
     skyBase += skySunset * goldHour * horizonGlow * 0.6;
 
@@ -113,13 +118,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     if (moonVis > 0.01 && sin(moonAngle) > 0.0) {
         float mGlitterX = abs(uv.x - moonPos.x) * aspect;
         moonGlitter = exp(-mGlitterX * mGlitterX * 10.0)
-                    * smoothstep(HORIZON - 0.01, HORIZON + 0.01, uv.y)
+                    * smoothstep(tideH - 0.01, tideH + 0.01, uv.y)
                     * moonVis;
     }
 
     // ── Stars at night ────────────────────────────────────────────────────
     float nightness = 1.0 - sunAbove;
-    if (nightness > 0.01 && uv.y < HORIZON) {
+    if (nightness > 0.01 && uv.y < tideH) {
 
         // ── Shared projection constants ───────────────────────────────────
         const float LAT    = 0.7767;   // 44.5°N (Maine) in radians
@@ -286,7 +291,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 pos   = vec2(uv.x * aspect * 3.0, uv.y * 3.0);
     vec3 surf  = oceanSurface(pos);
     float waveH  = surf.z;
-    float horizon = HORIZON + waveH * 0.04;
+    float horizon = tideH + waveH * 0.04;
 
     vec3 surfR = oceanSurface(pos + vec2(px.x * aspect * 3.0, 0.0));
     vec3 surfU = oceanSurface(pos + vec2(0.0, px.y * 3.0));
@@ -346,7 +351,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         vec2  fPos = fSt.rg;
         vec2  fVel = fSt.ba;
 
-        if (fPos.y < HORIZON + 0.01) continue;  // uninitialized
+        if (fPos.y < tideH + 0.01) continue;  // uninitialized or above tide
 
         // Fish-local coordinate space
         // Aspect-correct both d and the heading so nose points where fish moves
@@ -378,28 +383,31 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
     // ── Depth haze — Beer-Lambert extinction + scatter, like ripple ──────────
     if (uv.y > horizon) {
-        float depth = (uv.y - horizon) / (1.0 - horizon);  // 0=surface, 1=bottom
+        float depth = (uv.y - horizon) / 0.50;  // 0=surface, 1=~midscreen below surface
 
         // Per-channel extinction: R absorbed first, B last → warm→cool with depth
-        vec3  sigma = vec3(2.4, 1.4, 0.7) * mix(0.6, 1.0, sunAbove);
+        vec3  sigma = vec3(1.6, 0.9, 0.5) * mix(0.6, 1.0, sunAbove);
         vec3  T     = exp(-sigma * depth * depth);  // transmittance
 
         // Scatter veil: grows with depth, tinted by water color
         float scatter  = 1.0 - exp(-4.0 * depth * depth);
-        vec3  veilCol  = mix(shallowCol, deepCol, depth) * mix(0.3, 0.15, sunAbove);
+        vec3  veilCol  = mix(shallowCol, deepCol, depth) * mix(0.45, 0.28, sunAbove);
         veilCol        = mix(veilCol, vec3(0.18, 0.06, 0.04) * 0.3, goldHour * 0.5);
 
         color = color * T + veilCol * scatter;
 
         // ── Fish shadow god rays — shadow cones descend from each fish ────
         // Light leans slightly toward sun; contrast with clear water = rays
+        float moonVis2 = 1.0 - sunAbove;
+        float lightStr = max(sunAbove, moonVis2 * 0.35);  // moon dimmer than sun
+        float lightX   = mix(moonPos.x, sunPos.x, sunAbove);  // lean from whichever is up
         float fishOcclusion = 0.0;
         for (int i = 0; i < NUM_FISH; i++) {
             vec2  fUV  = vec2((float(i) + 0.5) / iResolution.x, 0.5 / iResolution.y);
             vec4  fSt  = texture(iChannel2, fUV);
             vec2  fPos = fSt.rg;
             vec2  fVel = fSt.ba;
-            if (fPos.y < HORIZON + 0.01) continue;
+            if (fPos.y < tideH + 0.01) continue;
             if (uv.y <= fPos.y + 0.005) continue;
 
             float d    = uv.y - fPos.y;
@@ -425,9 +433,6 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
             float shadow   = max(core, penumbra * 0.5) * exp(-d * 2.8);
             fishOcclusion = max(fishOcclusion, shadow);
         }
-        float moonVis2 = 1.0 - sunAbove;
-        float lightStr = max(sunAbove, moonVis2 * 0.35);  // moon dimmer than sun
-        float lightX   = mix(moonPos.x, sunPos.x, sunAbove);  // lean from whichever is up
         color = mix(color, color * 0.55, fishOcclusion * 0.38 * lightStr);
     }
 

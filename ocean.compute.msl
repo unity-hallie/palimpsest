@@ -10,7 +10,9 @@ using namespace metal;
 
 // ── Tuning ────────────────────────────────────────────────────────────────────
 #define NUM_FISH        32
-#define HORIZON         0.28f      // matches ocean.glsl
+#define HORIZON_MID     0.50f      // midtide — matches ocean.glsl HORIZON
+#define TIDE_AMP        0.17f      // matches ocean.glsl
+#define TIDE_TIME       180.0f     // matches ocean.glsl
 
 // Locomotion
 #define FISH_THRUST     0.00232f   // forward propulsion force
@@ -68,6 +70,7 @@ kernel void computeMain(
     // ── Time counter at slot NUM_FISH (after all fish) ────────────────────────
     float2 timeUV = float2(float(NUM_FISH) + 0.5f, 0.5f) / float2(W, H);
     float t = state_read.sample(smp, timeUV).r + 0.016f;
+    float tideH = HORIZON_MID + sin(t * 6.28318f / TIDE_TIME) * TIDE_AMP;
 
     if (gid.x == uint(NUM_FISH)) {
         state_write.write(float4(t, 0, 0, 0), gid);
@@ -89,7 +92,7 @@ kernel void computeMain(
     float2 vel = self.ba;
 
     // ── Initialize if invalid (first frame or escaped) ────────────────────────
-    bool invalid = (pos.y < HORIZON + 0.01f || pos.y > 0.98f ||
+    bool invalid = (pos.y < tideH + 0.01f || pos.y > 0.98f ||
                     pos.x < 0.01f || pos.x > 0.99f ||
                     (pos.x == 0.0f && pos.y == 0.0f));
     if (invalid) {
@@ -97,8 +100,9 @@ kernel void computeMain(
         float hx = hash21(float2(fi * 1.37f, t + 1.0f));
         float hy = hash21(float2(fi * 2.71f, t + 2.0f));
         float ha = hash21(float2(fi * 3.14f, t + 3.0f));
+        float spawnRange = max((1.0f - tideH) - 0.14f, 0.05f);  // fit within current water depth
         pos = float2(0.15f + hx * 0.70f,
-                     HORIZON + 0.12f + hy * 0.50f);
+                     tideH + 0.12f + hy * spawnRange);
         float angle = ha * 6.2832f;
         vel = float2(cos(angle), sin(angle)) * FISH_SPEED;
     }
@@ -115,7 +119,7 @@ kernel void computeMain(
         float4 nb   = state_read.sample(smp, nUV);
         float2 nPos = nb.rg;
         float2 nVel = nb.ba;
-        if (nPos.y < HORIZON) continue;  // uninitialized neighbor
+        if (nPos.y < tideH) continue;  // uninitialized neighbor
 
         float2 diff  = pos - nPos;
         float2 diffA = float2(diff.x * ASPECT, diff.y);  // aspect-correct distance
@@ -168,7 +172,7 @@ kernel void computeMain(
     float2 bForce = float2(0);
     if (pos.x < bm)             bForce.x += (bm - pos.x) / bm;
     if (pos.x > 1.0f - bm)     bForce.x -= (pos.x - (1.0f - bm)) / bm;
-    if (pos.y < HORIZON + bm)   bForce.y += (HORIZON + bm - pos.y) / bm;
+    if (pos.y < tideH + bm)     bForce.y += (tideH + bm - pos.y) / bm;
     if (pos.y > 0.94f)          bForce.y -= (pos.y - 0.94f) / 0.06f;
     steer += bForce * W_BOUNDARY * FISH_SPEED * 0.12f;
 

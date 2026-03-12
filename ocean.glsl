@@ -390,6 +390,42 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         veilCol        = mix(veilCol, vec3(0.18, 0.06, 0.04) * 0.3, goldHour * 0.5);
 
         color = color * T + veilCol * scatter;
+
+        // ── Fish shadow god rays — shadow cones descend from each fish ────
+        // Light leans slightly toward sun; contrast with clear water = rays
+        float fishOcclusion = 0.0;
+        for (int i = 0; i < NUM_FISH; i++) {
+            vec2  fUV  = vec2((float(i) + 0.5) / iResolution.x, 0.5 / iResolution.y);
+            vec4  fSt  = texture(iChannel2, fUV);
+            vec2  fPos = fSt.rg;
+            vec2  fVel = fSt.ba;
+            if (fPos.y < HORIZON + 0.01) continue;
+            if (uv.y <= fPos.y + 0.005) continue;
+
+            float d    = uv.y - fPos.y;
+            float lean = (sunPos.x - 0.5) * d * 0.4 * sunAbove;
+
+            // Project fragment back up to fish depth along sun direction
+            vec2 proj = vec2(uv.x - lean, fPos.y);
+
+            // Fish SDF at projected point — same as render
+            vec2  dp   = vec2((proj.x - fPos.x) * aspect, proj.y - fPos.y);
+            float bodyL = 0.011;
+            vec2  headS = length(fVel) > 0.00001
+                        ? normalize(vec2(fVel.x * aspect, fVel.y)) : vec2(1.0, 0.0);
+            float lx    = ( dp.x * headS.x + dp.y * headS.y) - bodyL;
+            float ly    = (-dp.x * headS.y + dp.y * headS.x);
+            float taper = smoothstep(bodyL * 0.6, -bodyL * 0.8, lx);
+            float bodyW = 0.0018 + taper * 0.0014;
+            float fishD = length(vec2(lx / bodyL, ly / bodyW));
+
+            // Core shadow (fish shape) + soft penumbra that spreads with depth
+            float core     = smoothstep(1.3, 0.7, fishD);
+            float penumbra = exp(-fishD * fishD / (0.8 + d * 4.0));  // widens with depth
+            float shadow   = max(core, penumbra * 0.5) * exp(-d * 2.8);
+            fishOcclusion = max(fishOcclusion, shadow);
+        }
+        color = mix(color, color * 0.55, fishOcclusion * 0.38 * sunAbove);
     }
 
     // ── Focus dim ─────────────────────────────────────────────────────────

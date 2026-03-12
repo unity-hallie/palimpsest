@@ -403,7 +403,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
             if (uv.y <= fPos.y + 0.005) continue;
 
             float d    = uv.y - fPos.y;
-            float lean = (sunPos.x - 0.5) * d * 0.4 * sunAbove;
+            float lean = (lightX - 0.5) * d * 0.4;
 
             // Project fragment back up to fish depth along sun direction
             vec2 proj = vec2(uv.x - lean, fPos.y);
@@ -425,7 +425,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
             float shadow   = max(core, penumbra * 0.5) * exp(-d * 2.8);
             fishOcclusion = max(fishOcclusion, shadow);
         }
-        color = mix(color, color * 0.55, fishOcclusion * 0.38 * sunAbove);
+        float moonVis2 = 1.0 - sunAbove;
+        float lightStr = max(sunAbove, moonVis2 * 0.35);  // moon dimmer than sun
+        float lightX   = mix(moonPos.x, sunPos.x, sunAbove);  // lean from whichever is up
+        color = mix(color, color * 0.55, fishOcclusion * 0.38 * lightStr);
     }
 
     // ── Focus dim ─────────────────────────────────────────────────────────

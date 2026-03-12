@@ -6,10 +6,10 @@
 
 // ── Tuning ────────────────────────────────────────────────────────────────────
 #define HORIZON      0.28     // where ocean meets sky (0=bottom, 1=top)
-#define WAVE_HEIGHT  0.024    // swell amplitude
-#define CHOP         0.78     // steepness / choppiness
+#define WAVE_HEIGHT  0.014    // swell amplitude
+#define CHOP         0.52     // steepness / choppiness
 #define FOAM_STR     0.55     // whitecap brightness
-#define REFRACT_STR  0.048    // text distortion through surface
+#define REFRACT_STR  0.028    // text distortion through surface
 #define CYCLE_TIME   600.0    // seconds per full day (10 min)
 #define NUM_FISH     32      // boid fish (matches ocean.compute.msl)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -80,17 +80,32 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
     if (moonVis > 0.01 && moonPos.y > 0.0 && moonPos.y < HORIZON) {
         float moonDist = length((uv - moonPos) * vec2(aspect, 1.0));
-        float moonDisc = smoothstep(0.026, 0.021, moonDist);  // sharp edge
+        float moonR    = 0.022;
+        float moonDisc = smoothstep(moonR, moonR * 0.82, moonDist);  // sharp edge
 
-        // Phase mask — offset sphere shadow
-        float phaseOffset = (moonPhase - 0.5) * 2.0;   // -1=new, 0=full, 1=new
-        vec2  moonLocal   = (uv - moonPos) * vec2(aspect, 1.0);
-        float shadow      = dot(normalize(vec2(phaseOffset, 0.0) + vec2(0.001)), moonLocal / 0.022);
-        float phaseMask   = smoothstep(-0.3, 0.3, shadow - phaseOffset * 0.6);
+        // Real sphere phase — sun direction relative to moon viewer
+        // phase 0=new(behind), 0.25=first quarter, 0.5=full(facing), 0.75=last quarter
+        float sunPhaseAngle = moonPhase * 6.28318;
+        vec3  sunDir        = vec3(sin(sunPhaseAngle), 0.0, cos(sunPhaseAngle));
+        // For this pixel, reconstruct 3D point on moon sphere
+        vec2  moonLocal = (uv - moonPos) * vec2(aspect, 1.0) / moonR;
+        float r2        = dot(moonLocal, moonLocal);
+        float mz        = sqrt(max(1.0 - r2, 0.0));         // z of sphere surface
+        vec3  moonSurf  = vec3(moonLocal, mz);               // point on unit sphere
+        float lit       = dot(moonSurf, sunDir);             // positive = sunlit
+        float phaseMask = smoothstep(-0.08, 0.08, lit);      // soft terminator
 
-        vec3 moonCol = vec3(0.88, 0.90, 0.78) * moonVis;
+        // Surface shading — limb darkening + terminator glow
+        float limb    = sqrt(max(mz, 0.0));
+        // Occlude sky behind entire disc — dark side blocks stars
+        skyBase *= (1.0 - moonDisc);
+        // Lit face
+        vec3  moonCol = vec3(0.88, 0.90, 0.78) * moonVis * limb;
         skyBase += moonCol * moonDisc * phaseMask;
-        skyBase += moonCol * 0.06 * exp(-moonDist * moonDist * 600.0) * moonVis; // tight halo
+        // Earthshine — very faint, just enough to show the disc is there
+        skyBase += vec3(0.012, 0.016, 0.022) * moonDisc * (1.0 - phaseMask) * moonVis;
+        // Halo
+        skyBase += vec3(0.88, 0.90, 0.78) * 0.06 * exp(-moonDist * moonDist * 600.0) * moonVis;
     }
 
     // ── Moonlight glitter — computed here, applied after waterCol ────────
@@ -366,7 +381,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         float depth = (uv.y - horizon) / (1.0 - horizon);  // 0=surface, 1=bottom
 
         // Per-channel extinction: R absorbed first, B last → warm→cool with depth
-        vec3  sigma = vec3(3.8, 2.2, 1.0) * mix(0.6, 1.0, sunAbove);
+        vec3  sigma = vec3(2.4, 1.4, 0.7) * mix(0.6, 1.0, sunAbove);
         vec3  T     = exp(-sigma * depth * depth);  // transmittance
 
         // Scatter veil: grows with depth, tinted by water color

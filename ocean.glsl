@@ -80,7 +80,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
     if (moonVis > 0.01 && moonPos.y > 0.0 && moonPos.y < HORIZON) {
         float moonDist = length((uv - moonPos) * vec2(aspect, 1.0));
-        float moonDisc = smoothstep(0.028, 0.016, moonDist);
+        float moonDisc = smoothstep(0.026, 0.021, moonDist);  // sharp edge
 
         // Phase mask — offset sphere shadow
         float phaseOffset = (moonPhase - 0.5) * 2.0;   // -1=new, 0=full, 1=new
@@ -90,7 +90,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
         vec3 moonCol = vec3(0.88, 0.90, 0.78) * moonVis;
         skyBase += moonCol * moonDisc * phaseMask;
-        skyBase += moonCol * 0.15 * exp(-moonDist * moonDist * 200.0) * moonVis; // halo
+        skyBase += moonCol * 0.06 * exp(-moonDist * moonDist * 600.0) * moonVis; // tight halo
     }
 
     // ── Moonlight glitter — computed here, applied after waterCol ────────
@@ -102,21 +102,162 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
                     * moonVis;
     }
 
-    // ── Stars at night — rotate around pole star (top-center) ────────────
+    // ── Stars at night ────────────────────────────────────────────────────
     float nightness = 1.0 - sunAbove;
     if (nightness > 0.01 && uv.y < HORIZON) {
-        float starAngle = iTime / CYCLE_TIME * 6.28318; // one full rotation per day
-        vec2  pole      = vec2(0.5, 0.0);               // pole star at top-center
-        vec2  d         = uv - pole;
-        float c = cos(starAngle), s = sin(starAngle);
-        vec2  rotUV     = pole + vec2(d.x*c - d.y*s, d.x*s + d.y*c);
-        vec2  starUV    = rotUV * vec2(aspect * 60.0, 60.0);
-        vec2  starCell  = floor(starUV);
-        vec2  starFrac  = fract(starUV);
-        float h = fract(sin(dot(starCell, vec2(127.1, 311.7))) * 43758.5);
-        if (h > 0.88) {
-            float star = exp(-length(starFrac - 0.5) * length(starFrac - 0.5) * 120.0);
-            skyBase += vec3(0.8, 0.85, 1.0) * star * nightness * fract(h * 17.3);
+
+        // ── Shared projection constants ───────────────────────────────────
+        const float LAT    = 0.7767;   // 44.5°N (Maine) in radians
+        const float sinLAT = 0.7009;
+        const float cosLAT = 0.7133;
+        float lst = fract(iTime / CYCLE_TIME) * 6.28318; // LST 0–2π
+
+        // ── Procedural background field — inverse projection into RA/Dec ──
+        // For this pixel, find its RA/Dec, then hash nearby cells for stars.
+        // All stars rotate correctly because they live in celestial coords.
+        {
+            float altFrac = 1.0 - uv.y / HORIZON;
+            float alt0    = altFrac * 1.5708;
+            float cosAlt0 = max(cos(alt0), 0.01);
+            float sinAlt0 = sin(alt0);
+            float spreadW = max(cos(alt0) * 0.50, 0.001);
+            float sinAz0  = -(uv.x - 0.5) / spreadW;
+
+            if (abs(sinAz0) < 0.999) {
+                // Force southern sky: az=π at center, az=π/2(E) left, az=3π/2(W) right
+                float az0  = 3.14159265 - asin(sinAz0);
+                // Alt/az → Dec, H (full atan2 so H ∈ [-π, π])
+                float sinD = sinAlt0 * sinLAT + cosAlt0 * cosLAT * cos(az0);
+                float dec0 = asin(clamp(sinD, -1.0, 1.0));
+                float cosD = max(cos(dec0), 0.001);
+                float Hnum = -cosAlt0 * sin(az0);
+                float Hden = sinAlt0 * cosLAT - cosAlt0 * sinLAT * cos(az0);
+                float H0   = atan(Hnum, Hden);
+                float ra0  = lst - H0;
+
+                // Cellular hash in RA/Dec space — 3×3 neighborhood
+                const float CS = 0.048; // cell size ~2.75°
+                for (int ci = -1; ci <= 1; ci++) {
+                for (int cj = -1; cj <= 1; cj++) {
+                    vec2  cv   = floor(vec2(ra0, dec0) / CS) + vec2(ci, cj);
+                    float hv   = fract(sin(dot(cv, vec2(127.1, 311.7))) * 43758.5);
+                    if (hv < 0.78) continue; // ~22% of cells have a star
+                    float ra_s  = (cv.x + 0.1 + fract(hv * 5.13) * 0.8) * CS;
+                    float dec_s = (cv.y + 0.1 + fract(hv * 9.37) * 0.8) * CS;
+                    float dRA   = ra0 - ra_s;
+                    float dDec  = dec0 - dec_s;
+                    float ang2  = dRA * dRA * cosD * cosD + dDec * dDec;
+                    float stB   = (0.16 + fract(hv * 23.1) * 0.12) * nightness;
+                    float stT   = 0.82 + 0.18 * sin(iTime * (0.4 + hv * 1.8) + hv * 17.3);
+                    skyBase    += vec3(0.82, 0.87, 1.00) * exp(-ang2 * 160000.0) * stB * stT;
+                }}
+            }
+        }
+
+        // ── Named catalog stars — Yale BSC, mag < 2.2 ────────────────────
+        // [RA_h, Dec_deg, mag, color: 0=white 1=orange 2=blue 3=yellow]
+
+        // 50 brightest named stars
+        // [RA_h, Dec_deg, mag, color: 0=white 1=orange 2=blue 3=yellow]
+        vec4 cat[35];
+        cat[ 0] = vec4( 6.75, -16.72, -1.46, 2.); // Sirius      blue-white
+        cat[ 1] = vec4( 6.40, -52.70, -0.72, 2.); // Canopus     white
+        cat[ 2] = vec4(14.26,  19.18, -0.04, 3.); // Arcturus    orange
+        cat[ 3] = vec4(18.62,  38.78,  0.03, 2.); // Vega        blue-white
+        cat[ 4] = vec4( 5.28,  46.00,  0.08, 3.); // Capella     yellow
+        cat[ 5] = vec4( 5.24,  -8.20,  0.12, 2.); // Rigel       blue-white
+        cat[ 6] = vec4( 7.65,   5.22,  0.34, 0.); // Procyon     white
+        cat[ 7] = vec4( 1.63, -57.24,  0.46, 2.); // Achernar    blue-white
+        cat[ 8] = vec4( 5.92,   7.41,  0.42, 1.); // Betelgeuse  orange-red
+        cat[ 9] = vec4(14.07, -60.37,  0.61, 2.); // Hadar       blue
+        cat[10] = vec4(19.85,   8.87,  0.76, 0.); // Altair      white
+        cat[11] = vec4(12.45, -63.10,  0.77, 2.); // Acrux       blue
+        cat[12] = vec4( 4.60,  16.51,  0.85, 1.); // Aldebaran   orange
+        cat[13] = vec4(16.49, -26.43,  0.96, 1.); // Antares     orange-red
+        cat[14] = vec4(13.42, -11.16,  0.97, 2.); // Spica       blue
+        cat[15] = vec4( 7.75,  28.03,  1.14, 3.); // Pollux      orange
+        cat[16] = vec4(22.96, -29.62,  1.16, 0.); // Fomalhaut   white
+        cat[17] = vec4(12.80, -59.69,  1.25, 2.); // Mimosa      blue
+        cat[18] = vec4(20.69,  45.28,  1.25, 2.); // Deneb       blue-white
+        cat[19] = vec4(10.14,  11.97,  1.35, 2.); // Regulus     blue-white
+        cat[20] = vec4( 6.98, -28.97,  1.50, 2.); // Adhara      blue
+        cat[21] = vec4( 7.58,  31.89,  1.57, 0.); // Castor      white
+        cat[22] = vec4(12.52, -57.11,  1.63, 1.); // Gacrux      orange
+        cat[23] = vec4(17.56, -37.10,  1.63, 2.); // Shaula      blue
+        cat[24] = vec4( 5.42,   6.35,  1.64, 2.); // Bellatrix   blue
+        cat[25] = vec4( 5.44,  28.61,  1.65, 0.); // Elnath      white
+        cat[26] = vec4( 9.22, -69.72,  1.68, 0.); // Miaplacidus white
+        cat[27] = vec4( 5.60,  -1.20,  1.70, 2.); // Alnilam     blue
+        cat[28] = vec4(22.08, -46.88,  1.74, 2.); // Alnair      blue
+        cat[29] = vec4(12.90,  55.96,  1.76, 0.); // Alioth      white
+        cat[30] = vec4( 5.68,  -1.94,  1.77, 2.); // Alnitak     blue
+        cat[31] = vec4(11.06,  61.75,  1.79, 3.); // Dubhe       orange
+        cat[32] = vec4( 3.41,  49.86,  1.79, 0.); // Mirfak      white
+        cat[33] = vec4( 7.14, -26.39,  1.84, 3.); // Wezen       yellow
+        cat[34] = vec4(18.40, -34.38,  1.85, 2.); // Kaus Aust.  blue
+        // Keep Polaris in the 35
+        cat[34] = vec4( 2.53,  89.26,  1.97, 3.); // Polaris     yellow
+
+        for (int i = 0; i < 35; i++) {
+            float ra_rad  = cat[i].x * 0.26180;   // hours → radians (*π/12)
+            float dec_rad = cat[i].y * 0.01745;   // degrees → radians (*π/180)
+            float mag     = cat[i].z;
+            float ctype   = cat[i].w;
+
+            // Hour angle and altitude/azimuth
+            float H      = lst - ra_rad;
+            float sinDec = sin(dec_rad), cosDec = cos(dec_rad);
+            float sinH   = sin(H),       cosH   = cos(H);
+
+            float sinAlt = sinDec * sinLAT + cosDec * cosLAT * cosH;
+            float alt    = asin(clamp(sinAlt, -1.0, 1.0));
+            if (alt < 0.02) continue;  // below horizon
+
+            float cosAlt = cos(alt);
+            float sinAz  = -cosDec * sinH / cosAlt;
+            float cosAz  = (sinDec - sinAlt * sinLAT) / (cosAlt * cosLAT);
+            float az     = atan(sinAz, cosAz);  // 0=N, π=S
+
+            if (cosAz > 0.0) continue;  // northern sky — behind us, skip
+
+            // Dome projection: spread ∝ cos(alt) — horizon wide, zenith clusters
+            float altFrac = alt / 1.5708;
+            float sY = HORIZON * (1.0 - altFrac);
+            float sX = 0.5 - sin(az) * cos(alt) * 0.50;
+
+            // Brightness from magnitude (lower = brighter)
+            float bright = clamp((2.5 - mag) / 4.0, 0.0, 1.0) * nightness;
+
+            // Color by spectral type
+            vec3 starCol = ctype < 0.5 ? vec3(0.88, 0.92, 1.00)  // white
+                         : ctype < 1.5 ? vec3(1.00, 0.65, 0.35)  // orange
+                         : ctype < 2.5 ? vec3(0.75, 0.85, 1.00)  // blue-white
+                         :               vec3(1.00, 0.95, 0.60);  // yellow
+
+            float dist  = length((uv - vec2(sX, sY)) * vec2(aspect, 1.0));
+            // Twinkle — slow irregular scintillation
+            float fi2     = float(i) * 2.399;
+            float tfreq   = 0.3 + float(i) * 0.071;
+            float twinkle = 0.78
+                          + 0.12 * sin(iTime * tfreq        + fi2)
+                          + 0.07 * sin(iTime * tfreq * 2.73 + fi2 * 1.4)
+                          + 0.03 * sin(iTime * tfreq * 5.11 + fi2 * 0.7);
+
+            // Aspect-corrected offset for spike calc
+            vec2  dA = vec2((uv.x - sX) * aspect, uv.y - sY);
+
+            // Sharp disc edge like the sun, size scales with brightness
+            float pointBright = min(bright, 0.55) * twinkle;
+            float starR  = 0.0018 + pointBright * 0.0012;  // radius varies with mag
+            float dist2  = length(dA);
+            float point  = smoothstep(starR, starR * 0.5, dist2) * pointBright;
+            float halo   = exp(-dist2 * dist2 * 6000.0) * pointBright * 0.04;
+
+            // Diffraction spikes — 4-point lens cross
+            float spikeH = exp(-dA.y*dA.y * 80000.0) * exp(-abs(dA.x) * 380.0);
+            float spikeV = exp(-dA.x*dA.x * 80000.0) * exp(-abs(dA.y) * 380.0);
+            float spikes = (spikeH + spikeV) * bright * twinkle * 0.18;
+            skyBase += starCol * (point + halo + spikes);
         }
     }
 

@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>tattoo.glsl — skin as terminal substrate</title>
+<style>
+
+:root {
+  --cream: #FAF7F2;
+  --ink: #1A1014;
+  --ink-mid: #5C4450;
+  --ink-light: #9A7888;
+  --coral: #A84040;
+  --brass: #907040;
+  --teal: #285870;
+  --grid: #EDE0D8;
+  --axis: #7A6068;
+  --paper: #FDFAF6;
+  --skin-fair: #E8DDD6;
+  --skin-mid: #C08870;
+  --skin-deep: #301820;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  background: var(--cream);
+  color: var(--ink);
+  line-height: 1.75;
+  overflow-x: hidden;
+}
+
+/* ── Hero ─────────────────────────────────────────────── */
+.hero { padding: 96px 24px 72px; text-align: center; background: var(--skin-fair); }
+.eyebrow { font-size: .72em; font-weight: 700; letter-spacing: .2em; text-transform: uppercase; color: var(--brass); margin-bottom: 28px; font-family: ui-monospace, monospace; }
+.hero h1 { font-size: clamp(2.4em,7vw,4.8em); font-weight: 900; line-height: 1.04; letter-spacing: -.025em; margin-bottom: 28px; }
+.hero h1 em { font-style: normal; color: var(--coral); }
+.hero .subtitle { font-size: 1.1em; color: var(--ink-mid); max-width: 500px; margin: 0 auto; line-height: 1.68; }
+.byline { font-size: .78em; color: var(--ink-light); margin-top: 20px; letter-spacing: .04em; }
+
+/* ── Section label ────────────────────────────────────── */
+.section-label { font-size: .72em; font-weight: 700; letter-spacing: .18em; text-transform: uppercase; color: var(--brass); margin-bottom: 14px; font-family: ui-monospace, monospace; }
+
+/* ── Prose ────────────────────────────────────────────── */
+.prose { max-width: 620px; margin: 0 auto; padding: 64px 24px; }
+.prose h2 { font-size: clamp(1.6em,3.5vw,2.1em); font-weight: 900; letter-spacing: -.02em; line-height: 1.15; margin-bottom: 24px; }
+.prose p { font-size: 1.05em; margin-bottom: 20px; line-height: 1.78; color: var(--ink-mid); }
+.prose p:last-child { margin-bottom: 0; }
+.prose p strong { color: var(--ink); font-weight: 700; }
+.prose .pull { font-size: 1.15em; font-weight: 700; color: var(--teal); line-height: 1.44; border-left: 3px solid var(--teal); padding: 2px 0 2px 22px; margin: 36px 0; }
+
+hr { border: none; border-top: 1px solid var(--grid); max-width: 620px; margin: 0 auto; }
+hr.full { max-width: none; }
+
+/* ── Aside btn ────────────────────────────────────────── */
+.aside-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; border-radius: 50%;
+  background: var(--brass); color: white; font-size: 10px; font-weight: 700;
+  border: none; cursor: pointer; vertical-align: middle; margin: 0 3px;
+  position: relative; top: -2px; line-height: 1;
+  transition: transform .2s, box-shadow .2s;
+  box-shadow: 0 1px 5px rgba(144,112,64,.32);
+  font-family: inherit;
+}
+.aside-btn:hover { transform: scale(1.15); box-shadow: 0 2px 10px rgba(144,112,64,.44); }
+
+/* ── Modal ────────────────────────────────────────────── */
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(26,16,20,.52); z-index: 200;
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+  opacity: 0; pointer-events: none; transition: opacity .28s ease;
+}
+.modal-backdrop.open { opacity: 1; pointer-events: auto; }
+.modal-box {
+  background: var(--paper); border-radius: 14px; max-width: 540px; width: 100%;
+  padding: 48px 44px 44px; position: relative;
+  transform: scale(.96) translateY(10px);
+  transition: transform .38s cubic-bezier(.22,1,.36,1);
+  box-shadow: 0 4px 8px rgba(26,16,20,.06), 0 16px 40px rgba(26,16,20,.16), 0 48px 80px rgba(26,16,20,.10);
+  max-height: 90vh; overflow-y: auto;
+}
+.modal-backdrop.open .modal-box { transform: scale(1) translateY(0); }
+.modal-close {
+  position: absolute; top: 16px; right: 16px; width: 32px; height: 32px;
+  border-radius: 50%; border: 1.5px solid var(--grid); background: white;
+  font-size: 17px; cursor: pointer; color: var(--ink-light);
+  display: flex; align-items: center; justify-content: center;
+  transition: border-color .18s, color .18s; box-shadow: 0 1px 4px rgba(26,16,20,.08);
+  font-family: inherit;
+}
+.modal-close:hover { border-color: var(--ink-mid); color: var(--ink); }
+.modal-box h3 { font-size: 1.35em; font-weight: 800; letter-spacing: -.015em; line-height: 1.2; margin-bottom: 20px; padding-right: 32px; }
+.modal-box p { font-size: .98em; color: var(--ink-mid); line-height: 1.76; margin-bottom: 16px; }
+.modal-box p:last-child { margin-bottom: 0; }
+.modal-label { font-size: .7em; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; color: var(--brass); margin-bottom: 12px; font-family: ui-monospace, monospace; }
+.modal-code { background: var(--cream); border-radius: 8px; padding: 16px 18px; font-family: ui-monospace, monospace; font-size: .85em; color: var(--ink); line-height: 1.6; margin: 16px 0; overflow-x: auto; white-space: pre; }
+
+/* ── Skin demo ────────────────────────────────────────── */
+.demo-section { max-width: 700px; margin: 0 auto; padding: 56px 24px; }
+.demo-section h2 { font-size: clamp(1.5em,3vw,2em); font-weight: 900; letter-spacing: -.02em; line-height: 1.15; margin-bottom: 12px; }
+.demo-section > .demo-intro { font-size: 1.05em; color: var(--ink-mid); margin-bottom: 32px; line-height: 1.72; }
+
+.skin-slider-wrap {
+  background: white; border-radius: 14px; padding: 36px 40px;
+  box-shadow: 0 1px 2px rgba(26,16,20,.04), 0 4px 12px rgba(26,16,20,.06), 0 20px 48px rgba(26,16,20,.08);
+  margin-bottom: 32px;
+}
+.skin-preview {
+  width: 100%; height: 80px; border-radius: 10px; margin-bottom: 24px;
+  transition: background .4s ease;
+  display: flex; align-items: center; justify-content: center;
+  font-family: ui-monospace, monospace; font-size: .92em; font-weight: 600;
+  letter-spacing: .04em; transition: background .4s ease, color .4s ease;
+}
+.slider-row { display: flex; align-items: center; gap: 16px; margin-bottom: 16px; }
+.slider-label { font-size: .8em; font-weight: 600; color: var(--ink-light); min-width: 64px; letter-spacing: .04em; }
+input[type=range] {
+  flex: 1; -webkit-appearance: none; height: 4px; border-radius: 2px;
+  background: var(--grid); outline: none; cursor: pointer;
+}
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%;
+  background: var(--brass); border: 2px solid white;
+  box-shadow: 0 1px 6px rgba(144,112,64,.3); cursor: pointer;
+}
+.slider-val { font-size: .8em; font-family: ui-monospace, monospace; color: var(--ink-light); min-width: 32px; text-align: right; }
+.skin-readout { font-size: .88em; color: var(--ink-light); font-style: italic; line-height: 1.6; margin-top: 8px; }
+
+/* ── Layer diagram ────────────────────────────────────── */
+.layers-wrap {
+  background: white; border-radius: 14px; padding: 40px;
+  box-shadow: 0 1px 2px rgba(26,16,20,.04), 0 4px 12px rgba(26,16,20,.06), 0 20px 48px rgba(26,16,20,.08);
+  margin-bottom: 32px;
+}
+.layer-stack { display: flex; flex-direction: column; gap: 0; border-radius: 10px; overflow: hidden; margin-bottom: 24px; }
+.layer {
+  padding: 18px 24px; display: flex; align-items: center; gap: 20px;
+  cursor: pointer; transition: filter .18s;
+}
+.layer:hover { filter: brightness(.96); }
+.layer-name { font-weight: 700; font-size: .95em; min-width: 120px; }
+.layer-desc { font-size: .88em; line-height: 1.5; opacity: .82; }
+.layer-detail {
+  overflow: hidden; max-height: 0;
+  transition: max-height .4s ease, padding .4s ease;
+  background: var(--cream); font-size: .9em; color: var(--ink-mid); line-height: 1.7;
+  padding: 0 24px;
+}
+.layer-detail.open { max-height: 200px; padding: 16px 24px; }
+.layer-hint { font-size: .8em; color: var(--ink-light); font-style: italic; margin-top: 16px; }
+
+/* ── Aging demo ───────────────────────────────────────── */
+.aging-wrap {
+  background: white; border-radius: 14px; padding: 40px;
+  box-shadow: 0 1px 2px rgba(26,16,20,.04), 0 4px 12px rgba(26,16,20,.06), 0 20px 48px rgba(26,16,20,.08);
+  margin-bottom: 32px;
+}
+.aging-timeline {
+  display: flex; gap: 0; margin-bottom: 24px; border-radius: 10px; overflow: hidden;
+}
+.age-band {
+  flex: 1; padding: 20px 12px; text-align: center; cursor: pointer;
+  transition: filter .18s; position: relative;
+}
+.age-band:hover { filter: brightness(.95); }
+.age-band.active::after {
+  content: ''; position: absolute; bottom: 0; left: 50%; transform: translateX(-50%);
+  width: 0; height: 0; border-left: 8px solid transparent; border-right: 8px solid transparent;
+  border-bottom: 8px solid white;
+}
+.age-band-label { font-size: .75em; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 6px; }
+.age-band-text { font-family: ui-monospace, monospace; font-size: .92em; font-weight: 600; }
+.age-readout {
+  background: var(--cream); border-radius: 8px; padding: 20px 24px;
+  font-size: .94em; color: var(--ink-mid); line-height: 1.7;
+  min-height: 80px; transition: opacity .3s ease;
+}
+
+/* ── Breath vis ───────────────────────────────────────── */
+.breath-wrap {
+  background: white; border-radius: 14px; padding: 40px;
+  box-shadow: 0 1px 2px rgba(26,16,20,.04), 0 4px 12px rgba(26,16,20,.06), 0 20px 48px rgba(26,16,20,.08);
+  margin-bottom: 32px; text-align: center;
+}
+#breathCanvas { display: block; margin: 0 auto 20px; border-radius: 8px; }
+.breath-label { font-size: .88em; color: var(--ink-light); font-style: italic; }
+
+/* ── Closing ──────────────────────────────────────────── */
+.closing {
+  background: var(--ink); color: white; padding: 88px 24px; text-align: center;
+}
+.closing h2 { font-size: clamp(1.8em,4.5vw,3em); font-weight: 900; line-height: 1.1; letter-spacing: -.025em; margin-bottom: 28px; }
+.closing h2 em { font-style: normal; color: var(--coral); }
+.closing p { font-size: 1.05em; color: rgba(255,255,255,.55); max-width: 500px; margin: 0 auto 18px; line-height: 1.72; }
+.closing a { color: rgba(255,255,255,.7); text-underline-offset: 3px; }
+.closing a:hover { color: white; }
+
+</style>
+</head>
+<body>
+
+<!-- ── Hero ─────────────────────────────────────────── -->
+<div class="hero">
+  <div class="eyebrow">palimpsest / tattoo.glsl</div>
+  <h1>Your terminal is<br><em>skin.</em></h1>
+  <p class="subtitle">A GLSL fragment shader that treats the background as dermis, the text as ink aging inside it, and the whole surface as a slowly breathing body.</p>
+  <p class="byline">Hallie Larsson &amp; Claude · 2026</p>
+</div>
+
+<!-- ── What it is ───────────────────────────────────── -->
+<div class="prose">
+  <div class="section-label">The idea</div>
+  <h2>Not a metaphor. A model.</h2>
+  <p>Most terminal themes are about color. This one is about <strong>tissue</strong>. The background color isn't a background — it's a chromophore reading. The text isn't rendered on top of anything; it's <strong>embedded in the dermis</strong>, the way real tattoo ink is. Everything else follows from that premise.</p>
+  <p>The shader runs every frame on the GPU. It has no idea what your text says. It only knows pixel colors, cursor position, and time. From those it reconstructs a skin tone, ages the ink, lights the surface, and breathes.</p>
+  <div class="pull">The background hex isn't a color choice. It's a biopsy.</div>
+  <p>Set your terminal background to a warm parchment and the shader infers fair, cool-undertoned skin. Set it to a deep warm brown and you get high-melanin dermis with different SSS<button class="aside-btn" onclick="openModal('sss')">?</button>, different bleed behavior, different ink legibility characteristics. The math is continuous — no presets, no skin tone menu.</p>
+</div>
+
+<hr>
+
+<!-- ── Skin tone demo ───────────────────────────────── -->
+<div class="demo-section">
+  <div class="section-label">Chromophore model</div>
+  <h2>Two axes, infinite skin</h2>
+  <p class="demo-intro">The shader reads two things from your background color: how much melanin<button class="aside-btn" onclick="openModal('melanin')">?</button> is present (background luminance, inverted) and how warm or cool the undertone is (red minus blue channel). These two values place you on a continuous skin gamut.</p>
+
+  <div class="skin-slider-wrap">
+    <div class="skin-preview" id="skinPreview">sample text</div>
+    <div class="slider-row">
+      <span class="slider-label">melanin</span>
+      <input type="range" id="melaninSlider" min="0" max="100" value="15" oninput="updateSkin()">
+      <span class="slider-val" id="melaninVal">0.15</span>
+    </div>
+    <div class="slider-row">
+      <span class="slider-label">warmth</span>
+      <input type="range" id="warmthSlider" min="0" max="100" value="55" oninput="updateSkin()">
+      <span class="slider-val" id="warmthVal">0.55</span>
+    </div>
+    <p class="skin-readout" id="skinReadout">Fair, warm-undertoned — the shader reads this as Scandinavian skin in indirect light.</p>
+  </div>
+</div>
+
+<hr>
+
+<!-- ── Layer diagram ────────────────────────────────── -->
+<div class="demo-section">
+  <div class="section-label">Rendering pipeline</div>
+  <h2>What's actually happening each frame</h2>
+  <p class="demo-intro">The shader runs six distinct passes in sequence, each building on the last. Tap a layer to see what it contributes.</p>
+
+  <div class="layers-wrap">
+    <div class="layer-stack" id="layerStack">
+      <div class="layer" style="background:#e8ddd6;color:#1a1014;" onclick="toggleLayer(0)">
+        <span class="layer-name">Skin base</span>
+        <span class="layer-desc">Chromophore model → skinBase color. FBM grain at 120Hz. SSS blush.</span>
+      </div>
+      <div class="layer-detail" id="layer0">Melanin and warmth values mix through a three-point gamut (fair → mid → deep) fully continuously. Fine-grain FBM noise adds pore-scale texture. Three gaussian layers of subsurface scattering add the characteristic red-dermis blush that makes skin look lit from within rather than painted.</div>
+
+      <div class="layer" style="background:#d4c8c0;color:#1a1014;" onclick="toggleLayer(1)">
+        <span class="layer-name">Body shape</span>
+        <span class="layer-desc">Mesh deformation. UV warped to follow a convex back surface.</span>
+      </div>
+      <div class="layer-detail" id="layer1">An 8×6 grid of control points deforms the UV space so text wraps around a curved body surface — specifically the small of the back, with a convex dome at center. Boundary nodes are pinned to zero displacement so edges stay flat. Interior nodes drift on slow independent sinusoids (muscle micro-movement) layered with a shared breathing displacement.</div>
+
+      <div class="layer" style="background:#b8a090;color:#1a1014;" onclick="toggleLayer(2)">
+        <span class="layer-name">Normal map + AO</span>
+        <span class="layer-desc">Surface normals from FBM heightfield. 8-direction horizon AO.</span>
+      </div>
+      <div class="layer-detail" id="layer2">The same FBM used for skin grain is used as a heightfield. Central differences give surface normals that drive the lighting model. Eight-direction horizon sampling approximates ambient occlusion — pores and surface pits are slightly shadowed. The body shape function is baked into the heightfield, so lighting responds to the macro curvature too.</div>
+
+      <div class="layer" style="background:#1a1014;color:#e8ddd6;" onclick="toggleLayer(3)">
+        <span class="layer-name">Ink detection</span>
+        <span class="layer-desc">Per-pixel ink mask. Color distance from background, not just luminance.</span>
+      </div>
+      <div class="layer-detail" id="layer3">Each pixel is compared to the background color using both luminance difference and full RGB distance. This catches colored terminal text that luma-only detection would miss. A 3×3 AA pass smooths the ink edges. A radial gaussian bleed kernel (scales with age, skips entirely for fresh ink) spreads the ink mark outward into the dermis.</div>
+
+      <div class="layer" style="background:#302040;color:#c8b0b8;" onclick="toggleLayer(4)">
+        <span class="layer-name">Ink aging</span>
+        <span class="layer-desc">Blue shift. Fade toward skin. Both delayed until top third of screen.</span>
+      </div>
+      <div class="layer-detail" id="layer4">Older ink (higher on screen) shifts toward cool blue — the way real tattoo pigment degrades as red-spectrum particles are broken down by the immune system faster than blue ones. The shift is hue-only: luminance is preserved so ink on dark skin doesn't accidentally lighten. The same age gradient also fades ink back toward the skin tone, like very old tattoos becoming a ghost of themselves. Both effects are zero for the bottom two-thirds of the screen and ramp in gently above that.</div>
+
+      <div class="layer" style="background:#f5e8c0;color:#1a1014;" onclick="toggleLayer(5)">
+        <span class="layer-name">Lighting</span>
+        <span class="layer-desc">2-minute day/night sun cycle. Incandescent lamp at night. Wrapped Lambert + Blinn-Phong.</span>
+      </div>
+      <div class="layer-detail" id="layer5">A sun arc completes one cycle every two minutes, passing through golden-hour color at low elevation. As it sets, an incandescent lamp fades in from the right with multi-frequency flicker. Lighting uses wrapped diffuse (Lambert * 0.5 + 0.5) for a soft terminator, plus Blinn-Phong specular. The bleed halo behavior flips with melanin: on fair skin it darkens (ink shadows in dermis); on deep skin it lightens (light ink scattering up against dark substrate).</div>
+    </div>
+    <p class="layer-hint">Tap any layer to expand.</p>
+  </div>
+</div>
+
+<hr>
+
+<!-- ── Aging timeline ───────────────────────────────── -->
+<div class="demo-section">
+  <div class="section-label">Ink age</div>
+  <h2>The top of the screen is older</h2>
+  <p class="demo-intro">Since we can't attach real timestamps to scrollback lines, age is approximated by vertical position — top of screen = oldest — plus a slow realtime drift so even static text ages while you watch.</p>
+
+  <div class="aging-wrap">
+    <div class="aging-timeline">
+      <div class="age-band active" id="ageBand0" style="background:#e8ddd6;color:#1a1014;" onclick="setAge(0)">
+        <div class="age-band-label">fresh</div>
+        <div class="age-band-text">just typed</div>
+      </div>
+      <div class="age-band" id="ageBand1" style="background:#d5c8c0;color:#1a1014;" onclick="setAge(1)">
+        <div class="age-band-label">weeks</div>
+        <div class="age-band-text">mid-screen</div>
+      </div>
+      <div class="age-band" id="ageBand2" style="background:#9898b8;color:#1a1014;" onclick="setAge(2)">
+        <div class="age-band-label">months</div>
+        <div class="age-band-text">upper third</div>
+      </div>
+      <div class="age-band" id="ageBand3" style="background:#7878a0;color:#e8ddd6;" onclick="setAge(3)">
+        <div class="age-band-label">years</div>
+        <div class="age-band-text">top of screen</div>
+      </div>
+    </div>
+    <div class="age-readout" id="ageReadout">
+      <strong>Fresh ink.</strong> Full color, no bleed, no blue shift. The ink reads exactly as your terminal foreground color. The dermis around it is undisturbed.
+    </div>
+  </div>
+</div>
+
+<hr>
+
+<!-- ── Breathing ────────────────────────────────────── -->
+<div class="demo-section">
+  <div class="section-label">The body breathes</div>
+  <h2>30 seconds. One cycle.</h2>
+  <p class="demo-intro">The mesh deformation is driven by a shared breathing waveform — a sum of harmonics with a slight negative bias so the exhale is longer than the inhale. Boundary nodes are pinned; interior nodes expand radially from the small of the back.</p>
+
+  <div class="breath-wrap">
+    <canvas id="breathCanvas" width="560" height="120"></canvas>
+    <p class="breath-label">One full breath cycle — 30 seconds at rest. Inhale rises faster; exhale stretches longer.</p>
+  </div>
+</div>
+
+<hr>
+
+<!-- ── Melanin spots ────────────────────────────────── -->
+<div class="prose">
+  <div class="section-label">Melanin spots</div>
+  <h2>Freckles aren't objects. They're concentration.</h2>
+  <p>The spots aren't rendered as circles with a special color. They're local increases in the melanin value before the skin gamut is computed — so a freckle on fair skin looks like a fair-skin freckle, and on mid-tone skin it looks like a mid-tone freckle. The chromophore math handles the rest automatically.</p>
+  <p>90 spots are scattered with a <strong>power-law size distribution</strong><button class="aside-btn" onclick="openModal('powerlaw')">?</button> — most are tiny (freckle-scale), a few are larger (mole-scale). They cluster toward the center of the screen and emerge over the first minute of the session, weighted by <code style="font-family:ui-monospace,monospace;font-size:.9em;">spotFair = (1 − melanin)²</code> so they're invisible on deep skin and prominent on fair.</p>
+  <div class="pull">The same chromophore that makes the skin also makes the spots. One model, zero special cases.</div>
+</div>
+
+<hr>
+
+<!-- ── Dark skin note ───────────────────────────────── -->
+<div class="prose">
+  <div class="section-label">Across the gamut</div>
+  <h2>The shader has to work for everyone.</h2>
+  <p>Early versions of the shader were tuned on fair skin and didn't work on dark. The bleed halo darkened ink that was already against a dark background, making it unreadable. SSS added a reddish blush that looked wrong on deep melanin. The blue-shift aging brightened dark-skin ink instead of just cooling its hue.</p>
+  <p>Each of these required a different fix. The halo direction flips with melanin: on fair skin it darkens (ink sinking), on deep skin it lightens (ink scattering up). The blue shift preserves luminance — only hue changes. SSS strength scales down to near-zero at high melanin. The deep skin tone in the gamut was made dark enough that mid-tone palette colors actually have contrast to work against.</p>
+  <p>It's not perfect. But it was designed with the full range in mind, not retrofitted after the fact.</p>
+</div>
+
+<!-- ── Closing ───────────────────────────────────────── -->
+<div class="closing">
+  <h2>A terminal that<br><em>lives.</em></h2>
+  <p>tattoo.glsl is part of <a href="https://github.com/hlarsson/palimpsest">palimpsest</a> — a nest of Ghostty shader experiments. It requires a custom Ghostty build with compute shader support.</p>
+  <p>Two configs: <code style="font-family:ui-monospace,monospace;opacity:.7">tattoo-light.conf</code> for fair skin, <code style="font-family:ui-monospace,monospace;opacity:.7">tattoo-dark.conf</code> for deep. Or set any background hex and let the chromophore model figure out the rest.</p>
+</div>
+
+<!-- ── Modals ─────────────────────────────────────────── -->
+<div class="modal-backdrop" id="modal" onclick="closeModalOutside(event)">
+  <div class="modal-box">
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div class="modal-label" id="modalLabel"></div>
+    <h3 id="modalTitle"></h3>
+    <div id="modalBody"></div>
+  </div>
+</div>
+
+<script>
+
+/* ── Modal ─────────────────────────────────────────── */
+const modals = {
+  sss: {
+    label: 'rendering technique',
+    title: 'Subsurface scattering',
+    body: `<p>Real skin is translucent. Light enters, scatters through tissue, and exits somewhere nearby — redder, softer, and slightly displaced from where it came in. This is why skin doesn't look like painted plastic.</p>
+<p>The shader approximates this with three gaussian blur passes on the terminal texture, each at a different radius and color weighting. Narrow radius, full spectrum. Mid radius, red-shifted. Wide radius, deep red only. The sum gives that characteristic warm glow around lit skin areas.</p>
+<p>SSS strength scales with melanin — fair skin shows dramatic subsurface color; deep skin shows almost none. This is accurate: high melanin absorbs and scatters light closer to the surface.</p>`
+  },
+  melanin: {
+    label: 'biology',
+    title: 'Melanin as the controlling variable',
+    body: `<p>Melanin is the pigment that determines skin tone. More melanin → darker skin, less light scatters through, different UV response, different aging characteristics.</p>
+<p>The shader derives melanin concentration from background luminance, inverted: <code style="font-family:ui-monospace,monospace;background:#f0ece6;padding:2px 6px;border-radius:4px">melanin = 1 − luma(bgColor)</code>. This means a dark terminal background implies high melanin; a light one implies low.</p>
+<p>Melanin then gates at least seven downstream calculations: SSS strength, skin gamut position, spot visibility, bleed halo direction, ink embed depth, normal scale, and grain amplitude. It's the single most load-bearing variable in the shader.</p>`
+  },
+  powerlaw: {
+    label: 'math',
+    title: 'Power-law size distribution',
+    body: `<p>In nature, many things follow power laws: earthquake magnitudes, city sizes, word frequencies. Melanin spots on skin are similar — there are vastly more small freckles than large moles.</p>
+<p>The shader uses <code style="font-family:ui-monospace,monospace;background:#f0ece6;padding:2px 6px;border-radius:4px">fR = mix(0.0018, 0.010, rRaw³)</code> — cubing the uniform random value before mixing compresses most spots toward the small end while allowing a few to be large. The result looks like a real freckle constellation rather than dots of uniform size.</p>`
+  }
+};
+
+function openModal(id) {
+  const m = modals[id];
+  document.getElementById('modalLabel').textContent = m.label;
+  document.getElementById('modalTitle').textContent = m.title;
+  document.getElementById('modalBody').innerHTML = m.body;
+  document.getElementById('modal').classList.add('open');
+}
+function closeModal() { document.getElementById('modal').classList.remove('open'); }
+function closeModalOutside(e) { if (e.target === document.getElementById('modal')) closeModal(); }
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+
+/* ── Skin preview ──────────────────────────────────── */
+function updateSkin() {
+  const m = document.getElementById('melaninSlider').value / 100;
+  const w = document.getElementById('warmthSlider').value / 100;
+  document.getElementById('melaninVal').textContent = m.toFixed(2);
+  document.getElementById('warmthVal').textContent = w.toFixed(2);
+
+  // Three-point gamut matching the GLSL
+  const fairCool = [0.94, 0.88, 0.86], fairWarm = [0.96, 0.90, 0.80];
+  const midCool  = [0.62, 0.46, 0.40], midWarm  = [0.70, 0.52, 0.34];
+  const deepCool = [0.16, 0.10, 0.09], deepWarm = [0.20, 0.13, 0.08];
+
+  function mix3(a, b, t) { return a.map((v,i) => v + (b[i]-v)*t); }
+  function smoothstep(a, b, x) { const t = Math.max(0, Math.min(1,(x-a)/(b-a))); return t*t*(3-2*t); }
+  function clamp(x,a,b) { return Math.max(a,Math.min(b,x)); }
+
+  const fair = mix3(fairCool, fairWarm, w);
+  const mid  = mix3(midCool,  midWarm,  w);
+  const deep = mix3(deepCool, deepWarm, w);
+  const midDeep = mix3(mid, deep, clamp(m*2-1,0,1));
+  const skin = mix3(fair, midDeep, smoothstep(0,1,m));
+
+  const r = Math.round(skin[0]*255), g = Math.round(skin[1]*255), b = Math.round(skin[2]*255);
+  const luma = skin[0]*0.299 + skin[1]*0.587 + skin[2]*0.114;
+  const fgColor = luma > 0.45 ? '#1a1014' : '#e8ddd6';
+
+  const el = document.getElementById('skinPreview');
+  el.style.background = `rgb(${r},${g},${b})`;
+  el.style.color = fgColor;
+  el.textContent = `#${r.toString(16).padStart(2,'0')}${g.toString(16).padStart(2,'0')}${b.toString(16).padStart(2,'0')}`;
+
+  const readouts = [
+    [0.1, 0.3, 'Fair, cool-undertoned — northern European skin in cool light.'],
+    [0.1, 0.7, 'Fair, warm-undertoned — Scandinavian skin in golden afternoon.'],
+    [0.4, 0.3, 'Medium, cool-undertoned — olive or East Asian complexion.'],
+    [0.4, 0.7, 'Medium, warm-undertoned — South Asian or Mediterranean skin.'],
+    [0.75, 0.4, 'Deep, cool-undertoned — high melanin with blue-brown undertone.'],
+    [0.75, 0.7, 'Deep, warm-undertoned — rich warm brown, West African complexion.'],
+  ];
+  let best = readouts[0], bestD = Infinity;
+  for (const r of readouts) {
+    const d = (r[0]-m)**2 + (r[1]-w)**2;
+    if (d < bestD) { bestD = d; best = r; }
+  }
+  document.getElementById('skinReadout').textContent = best[2];
+}
+updateSkin();
+
+/* ── Layer stack ───────────────────────────────────── */
+function toggleLayer(i) {
+  const el = document.getElementById('layer' + i);
+  el.classList.toggle('open');
+}
+
+/* ── Age bands ─────────────────────────────────────── */
+const ageContent = [
+  '<strong>Fresh ink.</strong> Full color, no bleed, no blue shift. The ink reads exactly as your terminal foreground color. The dermis around it is undisturbed.',
+  '<strong>Weeks old.</strong> A faint bleed halo begins spreading outward from letters. Ink color is unchanged — the blue shift hasn\'t kicked in yet. On fair skin the halo is a dark shadow; on deep skin it\'s a subtle lightening.',
+  '<strong>Months old.</strong> The ink has begun its blue shift — red pigment fades faster than blue in real tattoos, so colored ink drifts toward cool. Hue only: luminance is preserved. The bleed radius is wider. You can see ink sinking into the dermis.',
+  '<strong>Years old.</strong> The ink is ghosting. It fades back toward the skin tone — still readable, but diffuse and cool, the way a very old tattoo becomes more suggestion than statement. The blue is most pronounced here.'
+];
+function setAge(i) {
+  for (let j=0;j<4;j++) document.getElementById('ageBand'+j).classList.remove('active');
+  document.getElementById('ageBand'+i).classList.add('active');
+  document.getElementById('ageReadout').textContent = '';
+  setTimeout(() => { document.getElementById('ageReadout').innerHTML = ageContent[i]; }, 80);
+}
+
+/* ── Breath canvas ─────────────────────────────────── */
+const canvas = document.getElementById('breathCanvas');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+function breathWave(t) {
+  const tau = Math.PI * 2 / 30;
+  const raw = Math.sin(t * tau) * 0.72
+            + Math.sin(t * tau * 2 + 1.1) * 0.18
+            + Math.sin(t * tau * 3 + 0.5) * 0.06;
+  return Math.max(-1, Math.min(1, (raw - 0.14) / 0.82));
+}
+
+let startTime = null;
+function drawBreath(ts) {
+  if (!startTime) startTime = ts;
+  const t = (ts - startTime) / 1000;
+
+  ctx.clearRect(0, 0, W, H);
+
+  // Grid
+  ctx.strokeStyle = '#EDE0D8'; ctx.lineWidth = 1;
+  for (let x=0; x<=W; x+=W/6) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke(); }
+  ctx.beginPath(); ctx.moveTo(0, H/2); ctx.lineTo(W, H/2); ctx.stroke();
+
+  // Labels
+  ctx.fillStyle = '#9A7888'; ctx.font = '10px ui-monospace,monospace';
+  ctx.fillText('inhale', 8, H/2 - 12);
+  ctx.fillText('exhale', 8, H/2 + 20);
+
+  // Waveform
+  ctx.beginPath();
+  ctx.strokeStyle = '#907040'; ctx.lineWidth = 2.5;
+  const duration = 60; // show 2 cycles
+  for (let px=0; px<=W; px++) {
+    const sampleT = (px / W) * duration;
+    const v = breathWave(sampleT);
+    const y = H/2 - v * (H/2 - 16);
+    px === 0 ? ctx.moveTo(px, y) : ctx.lineTo(px, y);
+  }
+  ctx.stroke();
+
+  // Cursor — current position in the 60s window, looping every 30s
+  const cursorT = (t % 60);
+  const cursorX = (cursorT / 60) * W;
+  const cursorV = breathWave(cursorT);
+  const cursorY = H/2 - cursorV * (H/2 - 16);
+
+  ctx.beginPath();
+  ctx.strokeStyle = '#A84040'; ctx.lineWidth = 1.5;
+  ctx.setLineDash([4,4]);
+  ctx.moveTo(cursorX, 0); ctx.lineTo(cursorX, H);
+  ctx.stroke(); ctx.setLineDash([]);
+
+  ctx.beginPath();
+  ctx.fillStyle = '#A84040';
+  ctx.arc(cursorX, cursorY, 5, 0, Math.PI*2);
+  ctx.fill();
+
+  requestAnimationFrame(drawBreath);
+}
+requestAnimationFrame(drawBreath);
+
+// Scale canvas for retina
+(function() {
+  const dpr = window.devicePixelRatio || 1;
+  if (dpr === 1) return;
+  const w = canvas.width, h = canvas.height;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
+  ctx.scale(dpr, dpr);
+})();
+
+</script>
+</body>
+</html>

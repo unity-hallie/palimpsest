@@ -201,7 +201,7 @@ hr { border: none; border-top: 1px solid var(--grid); max-width: 620px; margin: 
         <span class="layer-name">Ink detection</span>
         <span class="layer-desc">Per-pixel ink mask. Color distance, not just luminance.</span>
       </div>
-      <div class="layer-detail" id="layer3">Each pixel is compared to the background using both luminance difference and full RGB distance — this catches colored terminal text that luma-only detection misses. A 3×3 AA pass softens edges. A radial gaussian bleed kernel (scales with age) spreads ink outward into the dermis.</div>
+      <div class="layer-detail" id="layer3">Each pixel is compared to the background using both luminance difference and full RGB distance — this catches colored terminal text that luma-only detection misses. A 2×2 rotated-grid supersample kills warp moir&eacute;. A radial gaussian bleed kernel (scales with age) spreads ink outward — the bleed halo tints surrounding skin toward the ink color rather than darkening it.</div>
       <div class="layer" style="background:#304880;color:#c8d0e8;" onclick="toggleLayer(4)">
         <span class="layer-name">Ink aging</span>
         <span class="layer-desc">Hue-only blue shift + fade. Delayed until top third of screen.</span>
@@ -209,9 +209,9 @@ hr { border: none; border-top: 1px solid var(--grid); max-width: 620px; margin: 
       <div class="layer-detail" id="layer4">Older ink (higher on screen) shifts toward cool blue — red pigment fades faster than blue in real tattoos. The shift preserves luminance so ink on dark skin doesn't accidentally lighten. On the same gradient, ink also fades back toward skin tone, like very old tattoos becoming a ghost of themselves. Both effects are zero in the bottom two-thirds.</div>
       <div class="layer" style="background:#f5e8c0;color:#1a1014;" onclick="toggleLayer(5)">
         <span class="layer-name">Lighting</span>
-        <span class="layer-desc">2-minute day/night sun arc. Incandescent lamp at night.</span>
+        <span class="layer-desc">Fixed window light from top-left. Ambient + diffuse + specular.</span>
       </div>
-      <div class="layer-detail" id="layer5">A sun arc completes every two minutes with golden-hour color at low elevation. As it sets an incandescent lamp fades in (right side, warm flicker). Wrapped Lambert diffuse + Blinn-Phong specular. The bleed halo flips with melanin: on fair skin it darkens (ink sinking); on deep skin it lightens (ink scattering up through dark dermis).</div>
+      <div class="layer-detail" id="layer5">Directional light from an off-screen window at top-left — no day/night cycle, no lamp, no flicker. Wrapped Lambert diffuse + Blinn-Phong specular + warm ambient floor. On dark skin, ink resists both the environment color tint (<code>tintResist</code>) and brightness variation from lighting (<code>lightResist</code>), so colors stay legible under any light angle. <code>inkEmbed</code> goes to 1.0 on dark skin — pure ink, no multiply blend with the dermis.</div>
     </div>
     <p class="layer-hint">Tap any layer to expand.</p>
   </div>
@@ -280,7 +280,9 @@ hr { border: none; border-top: 1px solid var(--grid); max-width: 620px; margin: 
   <div class="section-label">Across the gamut</div>
   <h2>The shader has to work for everyone.</h2>
   <p>Early versions were tuned on fair skin and didn't work on dark. The bleed halo darkened ink that was already against a dark background, making it unreadable. SSS added a reddish blush that looked wrong on deep melanin. The blue-shift aging brightened dark-skin ink instead of just cooling its hue.</p>
-  <p>Each required a different fix. The halo direction flips with melanin: on fair skin it darkens (ink sinking), on deep skin it lightens (ink scattering up). The blue shift now preserves luminance. SSS strength scales to near-zero at high melanin. The deep skin tones were made dark enough for mid-tone palette colors to have real contrast.</p>
+  <p>Each required a different fix. The blue shift is <strong>reduced 60% on dark skin</strong> to preserve color fidelity — especially greens, which were drifting toward teal. SSS strength scales to near-zero at high melanin. The skin base brightness is <strong>anchored 40% toward the actual background luminance</strong>, so a dark terminal background stays dark rather than drifting toward the chromophore model's idea of what that melanin level should look like.</p>
+  <p>The biggest change is the <strong>luminous ink system</strong>. On dark skin, ink glows from within — an additive <code>inkGlow</code> term scaled by melanin. Mid-tone colors get extra pop (<code>midPop</code>: saturated colors in the middle luminance range are boosted). Colors approaching the skin tone glow harder (<code>skinProximity</code>), because they're the ones most at risk of disappearing. Ink light bleeds into surrounding skin through the fringe, giving letters a faint halo.</p>
+  <p><code>INK_MIN_LUMA</code> enforces a minimum ink brightness floor on dark skin, so mid-tone palette colors stay readable instead of sinking into the substrate. And in the composite, ink resists environment color tint (<code>tintResist</code>) and lighting brightness variation (<code>lightResist</code>) — both scaled by melanin, so dark-skin ink reads as its actual color, not as a tinted version of it. <code>inkEmbed</code> goes to 1.0 on dark skin: pure ink, no multiply blend with the dermis.</p>
   <p>It's not perfect. But it was <strong>designed with the full range in mind</strong>, not retrofitted after the fact.</p>
 </div>
 
@@ -352,10 +354,11 @@ const FRAG_BODY = `
 #define BLEED_MAX       2.5
 #define BLUE_SHIFT_MAX  0.5
 #define LIGHT_HEIGHT    1.2
-#define DIFFUSE_STR     0.10
-#define SPECULAR_STR    0.06
+#define DIFFUSE_STR     0.38
+#define SPECULAR_STR    0.10
 #define SPECULAR_EXP    28.0
-#define AMBIENT         0.92
+#define AMBIENT         0.55
+#define INK_MIN_LUMA    0.55
 #define MESH_COLS       8
 #define MESH_ROWS       6
 #define SPOT_COUNT      90
@@ -427,18 +430,18 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
   float age=clamp(((1.0-uv.y)*BASE_AGE+iTime*DRIFT_RATE)/(BASE_AGE+1.0),0.0,1.0);
   float bleedRadius=age*BLEED_MAX;
 
-  vec3 term=texture(iChannel0,uvWarp).rgb;
   vec3 bgColor=iBackgroundColor.rgb;
 
-  float inkMask=inkDetect(term,bgColor);
-  float aaBlur=0.0,aaW=0.0;
-  for(int i=-1;i<=1;i++){for(int j=-1;j<=1;j++){
-    float w=1.0-length(vec2(i,j))*0.35;
-    vec2 sUV=clamp(uvWarp+vec2(i,j)*px,0.001,0.999);
-    aaBlur+=inkDetect(texture(iChannel0,sUV).rgb,bgColor)*w;
-    aaW+=w;
-  }}
-  inkMask=mix(inkMask,aaBlur/aaW,0.4);
+  // 2x2 rotated-grid supersample to kill warp moire
+  vec2 ssOff=px*0.375;
+  vec3 t0=texture(iChannel0,uvWarp+vec2(-ssOff.x, ssOff.y)).rgb;
+  vec3 t1=texture(iChannel0,uvWarp+vec2( ssOff.x, ssOff.y)).rgb;
+  vec3 t2=texture(iChannel0,uvWarp+vec2(-ssOff.x,-ssOff.y)).rgb;
+  vec3 t3=texture(iChannel0,uvWarp+vec2( ssOff.x,-ssOff.y)).rgb;
+  vec3 term=(t0+t1+t2+t3)*0.25;
+
+  float inkMask=(inkDetect(t0,bgColor)+inkDetect(t1,bgColor)
+                +inkDetect(t2,bgColor)+inkDetect(t3,bgColor))*0.25;
 
   float bleedMask=inkMask;
   int bleedTaps=age<0.25?0:(age<0.6?1:2);
@@ -460,7 +463,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
   float blueShift=age*BLUE_SHIFT_MAX*smoothstep(0.65,0.25,uv.y);
   float fringe=clamp(bleedMask-inkMask,0.0,1.0);
-  float shiftAmt=blueShift*clamp(inkMask+fringe,0.0,1.0);
+  float shiftAmt=blueShift*clamp(inkMask+fringe,0.0,1.0)*mix(1.0,0.4,1.0-luma(bgColor));
   vec3 termShifted=term*vec3(0.65,0.88,1.20);
   float termLuma=max(luma(term),0.001);
   termShifted*=termLuma/max(luma(termShifted),0.001);
@@ -493,6 +496,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
   vec3 midTone=mix(vec3(0.62,0.46,0.40),vec3(0.70,0.52,0.34),warmth);
   vec3 deepTone=mix(vec3(0.16,0.10,0.09),vec3(0.20,0.13,0.08),warmth);
   vec3 skinBase=mix(fairTone,mix(midTone,deepTone,clamp(localMelanin*2.0-1.0,0.0,1.0)),smoothstep(0.0,1.0,localMelanin));
+  skinBase*=mix(1.0,luma(skinBase)>0.001?bgLuma/luma(skinBase):1.0,0.4);
   skinBase+=(fbm(uvWarp*120.0)-0.5)*0.025*skinGrain;
 
   vec3 sss=vec3(0.0);
@@ -518,47 +522,40 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
   for(int i=0;i<8;i++){float a=float(i)*0.7854;vec2 dir=vec2(cos(a),sin(a))*aoRadius;float hN=skinHeight(uvWarp+dir);ao+=clamp((hN-hC)*1.5,0.0,1.0);}
   ao=1.0-ao/8.0*0.12;
 
-  float sunT=iTime/120.0*6.28318;
-  float sunH=sin(sunT);
-  float dayness=smoothstep(-0.15,0.25,sunH);
-  vec2 sunUV=vec2(0.5+0.7*cos(sunT),0.5-0.55*sunH);
-  float elevation=clamp(sunH,0.0,1.0);
-  float goldenHour=smoothstep(0.35,0.0,elevation)*dayness;
-  vec3 noonColor=vec3(1.00,0.97,0.92);
-  vec3 goldenColor=vec3(1.00,0.72,0.35);
-  vec3 dawnColor=vec3(1.00,0.55,0.30);
-  vec3 dayColor=mix(noonColor,mix(goldenColor,dawnColor,goldenHour),goldenHour);
-  vec3 nightColor=vec3(0.55,0.65,0.90);
-  vec3 lightColor=mix(nightColor,dayColor,dayness);
-  float nightAmbient=AMBIENT*0.45;
-  float ambientLevel=mix(nightAmbient,AMBIENT,dayness);
-  vec3 lightDir=normalize(vec3(sunUV-uv,LIGHT_HEIGHT));
+  // Window light from top-left
+  vec2 sunUV=vec2(-0.3,-0.3);
+  vec3 lightDir=normalize(vec3(sunUV-uv,LIGHT_HEIGHT*2.5));
   float diffuse=(dot(normal,lightDir)*0.5+0.5)*DIFFUSE_STR;
   vec3 halfDir=normalize(lightDir+vec3(0,0,1));
   float specular=pow(max(dot(normal,halfDir),0.0),SPECULAR_EXP)*SPECULAR_STR*mix(1.0,0.3,melanin)*(1.0-inkMask*0.85);
-  float nightness=1.0-dayness;
-  float flicker=1.0+sin(iTime*2.1)*0.025+sin(iTime*3.7)*0.015+sin(iTime*1.3)*0.035;
-  vec2 lampUV=vec2(1.15,0.45);
-  vec3 lampDir=normalize(vec3(lampUV-uv,LIGHT_HEIGHT*0.6));
-  vec3 lampHalf=normalize(lampDir+vec3(0,0,1));
-  float lampDiff=(dot(normal,lampDir)*0.5+0.5)*DIFFUSE_STR*3.2;
-  float lampSpec=pow(max(dot(normal,lampHalf),0.0),SPECULAR_EXP)*SPECULAR_STR*mix(1.2,0.3,melanin)*(1.0-inkMask*0.85);
-  vec3 lampColor=vec3(1.0,0.72,0.38)*flicker;
-  float lampLighting=(lampDiff+lampSpec)*nightness;
-  float lighting=clamp(ambientLevel+diffuse*dayness+specular*dayness+lampLighting,0.0,1.2);
-  vec3 sunTint=mix(vec3(1.0),lightColor,0.4);
-  vec3 lampTint=mix(vec3(1.0),lampColor,0.5);
-  vec3 lightTint=mix(sunTint,lampTint,nightness*smoothstep(0.0,0.3,nightness))*lighting;
+  float lighting=clamp(AMBIENT+diffuse+specular,0.0,1.15);
+  vec3 lightTint=vec3(1.0,0.99,0.95)*lighting;
 
-  vec3 bleedTarget=mix(skinBase*0.76,mix(skinBase,inkColor,0.55),melanin);
-  vec3 color=mix(skinBase,bleedTarget,bleedMask*0.7);
+  vec3 bleedTint=mix(skinBase,inkColor,0.15);
+  vec3 color=mix(skinBase,bleedTint,fringe*0.5);
   color*=ao;
-  float inkEmbed=mix(0.55,0.92,melanin);
-  vec3 inkBoosted=mix(inkColor,inkColor+(inkColor-skinBase)*0.3,melanin);
-  float inkFade=1.0-smoothstep(0.33,0.85,1.0-uv.y)*0.45;
+  float inkEmbed=mix(0.55,1.0,melanin);
+  float inkLuma2=luma(inkColor);
+  float minLuma=melanin*INK_MIN_LUMA;
+  float lift=max(0.0,minLuma-inkLuma2)/max(inkLuma2,0.01);
+  vec3 inkLifted=inkColor*(1.0+lift);
+  vec3 inkBoosted=mix(inkLifted,inkLifted+(inkLifted-skinBase)*0.5,melanin);
+  float fadeAmount=mix(0.28,0.05,melanin);
+  float inkFade=1.0-smoothstep(0.18,0.92,1.0-uv.y)*fadeAmount;
   color=mix(color,mix(skinBase*inkBoosted*1.6,inkBoosted,inkEmbed),inkMask*inkFade);
-  vec3 inkLightTint=mix(lightTint,vec3(luma(lightTint)*0.5+0.5),inkMask*melanin);
-  color*=(1.0-inkMask*0.05)*inkLightTint;
+  // Luminous ink on dark skin
+  float midPop=1.0+smoothstep(0.15,0.4,inkLuma2)*smoothstep(0.7,0.4,inkLuma2)*1.5;
+  float skinProximity=1.0-clamp(length(inkColor-skinBase)*3.0,0.0,1.0);
+  float inkGlow=inkMask*melanin*mix(0.2,0.7,skinProximity)*midPop;
+  color+=inkBoosted*inkGlow;
+  float skinGlow=fringe*melanin*0.35*midPop;
+  color+=inkBoosted*skinGlow;
+  // Ink resists tint and lighting variation on dark skin
+  float tintResist=inkMask*mix(0.5,0.9,melanin);
+  vec3 inkLightTint=mix(lightTint,vec3(luma(lightTint)*0.5+0.5),tintResist);
+  float lightResist=inkMask*melanin*0.35;
+  vec3 flatLight=mix(inkLightTint,vec3(1.0),lightResist);
+  color*=(1.0-inkMask*0.05)*flatLight;
 
   // Focus always on in web demo
   fragColor=vec4(clamp(color,0.0,1.0),1.0);
@@ -622,7 +619,7 @@ const INIT_LINES = [
   [{text:'mesh: ', color:'#285870'},{text:'8×6 nodes, boundary pinned', color:null}],
   [{text:'breath: ', color:'#285870'},{text:'30s cycle, organic waveform', color:null}],
   [{text:'spots: ', color:'#285870'},{text:'90 freckles+moles, emerging over 60s', color:null}],
-  [{text:'light: ', color:'#285870'},{text:'120s day/night cycle, golden hour', color:null}],
+  [{text:'light: ', color:'#285870'},{text:'fixed window from top-left, warm ambient', color:null}],
   [{text:'', color:null}],
 ];
 termLines = INIT_LINES.map(l => l);

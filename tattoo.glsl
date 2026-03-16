@@ -40,6 +40,7 @@ float fbm(vec2 p) {
     return v;
 }
 
+// Wrinkles: fine circumferential creases from cumulative breathing strain.
 // Body macro-shape: small-of-back concave dip at lower-center, flat at edges.
 // Negative = surface dips away from viewer (concave bowl).
 float bodyHeight(vec2 p) {
@@ -58,6 +59,24 @@ float bodyHeight(vec2 p) {
 
 float skinHeight(vec2 p) {
     return fbm(p * 8.0) * 0.7 + fbm(p * 55.0) * 0.3 + bodyHeight(p) * 0.8;
+}
+
+// Valley fold: existing FBM valleys deepen when compressed by breathing.
+// Skin has its own texture — valleys are where surface area goes on exhale.
+// No separate wrinkle pattern: the creases emerge from the skin's own structure.
+float valleyFold(vec2 p, float asp, float br, float cycleCount) {
+    float h = skinHeight(p);
+    // How far below average is this point? (FBM mean ≈ 0.48)
+    float valley = max(0.0, 0.48 - h);
+    // Strain ring: folds concentrate where displacement gradient is steepest
+    vec2  fromC = p - vec2(0.5, 0.68);
+    float d     = length(fromC * vec2(asp, 1.0));
+    float strain = d * exp(-d * d * 1.5) * 2.2;
+    // Transient: valleys fold deeper on exhale, smooth on inhale
+    float compression = max(0.0, -br);
+    // Permanent scoring: same valleys score over many cycles (log plateau)
+    float scoring = clamp(log(1.0 + cycleCount * 0.35) / 3.2, 0.0, 1.0);
+    return -valley * strain * (compression * 0.9 + scoring * 0.35);
 }
 
 // Ink detection: how different is this pixel from the background?
@@ -249,10 +268,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     skinBase += sss * sssStrength * 0.18 * (1.0 - bleedMask);
 
     // ── Normal map — direct central differences ───────────────────────────
+    float cycleCount = iTime / 30.0;  // breath cycles elapsed
     float eps = 0.014;
-    float hC = skinHeight(uvWarp);
-    float hR = skinHeight(uvWarp + vec2(eps, 0.0));
-    float hU = skinHeight(uvWarp + vec2(0.0, eps));
+    float hC = skinHeight(uvWarp)                  + valleyFold(uvWarp,                  aspect, breath, cycleCount);
+    float hR = skinHeight(uvWarp + vec2(eps, 0.0)) + valleyFold(uvWarp + vec2(eps, 0.0), aspect, breath, cycleCount);
+    float hU = skinHeight(uvWarp + vec2(0.0, eps)) + valleyFold(uvWarp + vec2(0.0, eps), aspect, breath, cycleCount);
     float normalScale = mix(0.12, 0.22, melanin);
     vec3 normal = normalize(vec3(
         (hC - hR) * normalScale * aspect,

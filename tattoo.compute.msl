@@ -39,6 +39,13 @@ kernel void computeMain(
     float4 cursorEnc = feedback.sample(near, encodedUV);
     float2 cursorUV  = cursorEnc.rg;  // cursor position in UV space
 
+    // ── Derive melanin from terminal bg (corner sample) ──────────────────────
+    float4 bgSample = terminal.sample(near, float2(0.01f, 0.01f));
+    float bgLuma  = dot(bgSample.rgb, float3(0.299f, 0.587f, 0.114f));
+    float melanin = 1.0f - bgLuma;
+    // Cap scales with skin tone: fair skin tans to ~0.5, deep skin barely moves
+    float tanCap = TAN_MAX * (1.0f - melanin * 0.85f);
+
     // ── Current tan state ─────────────────────────────────────────────────────
     float tan = state_read.sample(smp, uv).r;
 
@@ -50,7 +57,7 @@ kernel void computeMain(
 
     // ── Accumulate, fade, clamp ───────────────────────────────────────────────
     tan = tan * TAN_FADE + exposure * TAN_RATE;
-    tan = clamp(tan, 0.0f, TAN_MAX);
+    tan = clamp(tan, 0.0f, tanCap);
 
     state_write.write(float4(tan, 0.0f, 0.0f, 1.0f), gid);
 }

@@ -118,7 +118,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
             totalW   += w;
         }
     }
-    vec2 uvWarp = uv + (totalW > 0.0 ? meshDisp / totalW : vec2(0.0));
+    vec2 rawWarp = totalW > 0.0 ? meshDisp / totalW : vec2(0.0);
+    vec2 uvWarp  = uv + rawWarp;
 
     // ── Age — continuous, no bands ────────────────────────────────────────
     float age = clamp(((1.0 - uv.y) * BASE_AGE + iTime * DRIFT_RATE) / (BASE_AGE + 1.0), 0.0, 1.0);
@@ -207,7 +208,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // Three-point mix: fair → mid → deep, fully continuous
     vec3 fairTone = mix(vec3(0.94,0.88,0.86), vec3(0.96,0.90,0.80), warmth);
     vec3 midTone  = mix(vec3(0.62,0.46,0.40), vec3(0.70,0.52,0.34), warmth);
-    vec3 deepTone = mix(vec3(0.28,0.18,0.16), vec3(0.35,0.22,0.12), warmth);
+    vec3 deepTone = mix(vec3(0.16,0.10,0.09), vec3(0.20,0.13,0.08), warmth);
     vec3 skinBase = mix(fairTone, mix(midTone, deepTone, clamp(localMelanin*2.0-1.0, 0.0,1.0)),
                         smoothstep(0.0, 1.0, localMelanin));
 
@@ -317,10 +318,19 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec3 lightTint = mix(sunTint, lampTint, nightness * smoothstep(0.0, 0.3, nightness)) * lighting;
 
     // ── Composite ─────────────────────────────────────────────────────────
-    vec3 color = mix(skinBase, mix(skinBase, skinBase * 0.82, 0.6), bleedMask);
+    // Bleed halo: fair skin → darken around letters (ink sinks into dermis).
+    // Deep skin → lighten toward ink color (light ink scatters into dark dermis).
+    vec3 bleedTarget = mix(skinBase * 0.76, mix(skinBase, inkColor, 0.55), melanin);
+    vec3 color = mix(skinBase, bleedTarget, bleedMask * 0.7);
     color *= ao;
-    color = mix(color, mix(skinBase * inkColor * 1.6, inkColor, 0.55), inkMask);
-    color *= (1.0 - inkMask * 0.05) * lightTint;
+    // Ink embed: fair skin = ink tinted by dermis; deep skin = ink reads directly.
+    // Also boost ink brightness on deep skin so mid-tone colors don't sink into substrate.
+    float inkEmbed  = mix(0.55, 0.92, melanin);
+    vec3  inkBoosted = mix(inkColor, inkColor + (inkColor - skinBase) * 0.3, melanin);
+    color = mix(color, mix(skinBase * inkBoosted * 1.6, inkBoosted, inkEmbed), inkMask);
+    // Light tint applies to skin; ink pixels get only a gentle tint so colors stay legible
+    vec3 inkLightTint = mix(lightTint, vec3(luma(lightTint) * 0.5 + 0.5), inkMask * melanin);
+    color *= (1.0 - inkMask * 0.05) * inkLightTint;
 
     // ── Focus dim ─────────────────────────────────────────────────────────
     float focusT   = clamp((iTime - iTimeFocus) * 1.5, 0.0, 1.0);

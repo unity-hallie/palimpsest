@@ -151,7 +151,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     skinBase += sss * sssStrength * 0.18 * (1.0 - bleedMask);
 
     // ── Normal map — direct central differences ───────────────────────────
-    float eps = 0.014;  // wider sample distance = smoother normals
+    float eps = 0.014;
     float hC = skinHeight(uv);
     float hR = skinHeight(uv + vec2(eps, 0.0));
     float hU = skinHeight(uv + vec2(0.0, eps));
@@ -160,6 +160,18 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         (hC - hR) * normalScale * aspect,
         (hU - hC) * normalScale,
         1.0));
+
+    // ── Ambient occlusion — horizon sampling from heightfield ─────────────
+    // Sample 8 directions, check if neighbors are higher (occluding)
+    float ao = 0.0;
+    float aoRadius = 0.005;
+    for (int i = 0; i < 8; i++) {
+        float a = float(i) * 0.7854;
+        vec2 dir = vec2(cos(a), sin(a)) * aoRadius;
+        float hN = skinHeight(uv + dir);
+        ao += clamp((hN - hC) * 1.5, 0.0, 1.0);
+    }
+    ao = 1.0 - ao / 8.0 * 0.12;
 
     // ── Lighting — offscreen sun, 2-minute day/night cycle ────────────────
     float sunT    = iTime / 120.0 * 6.28318;  // full cycle in 120s
@@ -215,6 +227,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
     // ── Composite ─────────────────────────────────────────────────────────
     vec3 color = mix(skinBase, mix(skinBase, skinBase * 0.82, 0.6), bleedMask);
+    color *= ao;
     color = mix(color, mix(skinBase * inkColor * 1.6, inkColor, 0.55), inkMask);
     color *= (1.0 - inkMask * 0.05) * lightTint;
 

@@ -404,12 +404,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec3  lightTint = vec3(1.0, 0.99, 0.95) * lighting;  // warm window light
 
     // ── Composite ─────────────────────────────────────────────────────────
-    // Bleed halo: ink bleeds into dermis just outside the glyph edge.
-    // On fair skin the fringe darkens (ink sinks in visibly).
-    // On deep skin the effect vanishes — dark ink on dark dermis leaves no ring.
-    float bleedVis = (1.0 - melanin) * (1.0 - melanin);  // zero on dark skin (high melanin)
-    vec3 bleedTarget = skinBase * mix(1.0, 0.76, bleedVis);
-    vec3 color = mix(skinBase, bleedTarget, bleedMask * 0.7 * bleedVis);
+    // Bleed halo: ink color seeps subtly into surrounding skin
+    vec3 bleedTint = mix(skinBase, inkColor, 0.15);  // skin tinted toward ink
+    vec3 color = mix(skinBase, bleedTint, fringe * 0.5);
     color *= ao;
     // Ink embed: fair skin = ink tinted by dermis; deep skin = ink reads directly.
     // Also boost ink brightness on deep skin so mid-tone colors don't sink into substrate.

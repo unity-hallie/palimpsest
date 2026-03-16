@@ -1,6 +1,10 @@
 // tattoo.glsl — skin as substrate, text as ink aging in dermis
 //
 // iChannel0 = terminal content
+// iChannel2 = compute state (R = accumulated tan per pixel)
+//
+// Cursor UV encoded into output pixel (0,0) each frame so compute
+// shader can read it from feedback next frame.
 //
 // Age model: age = (1.0 - uv.y) * BASE_AGE + iTime * DRIFT_RATE
 // Posterized into bands: fresh / settled / aged / scattered / ghost
@@ -130,6 +134,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float melanin = 1.0 - bgLuma;
     float warmth  = clamp((bgColor.r - bgColor.b) * 2.0 + 0.5, 0.0, 1.0);
 
+    // ── Tan: accumulated per-pixel exposure from compute ──────────────────
+    float tan = texture(iChannel2, uv).r;
+    // Fair skin tans more dramatically; deep skin barely changes
+    float tanInfluence = tan * mix(0.5, 0.05, melanin);
+    melanin = clamp(melanin + tanInfluence, 0.0, 0.95);
+    // Tanning also warms the undertone slightly
+    warmth = clamp(warmth + tan * mix(0.3, 0.05, melanin), 0.0, 1.0);
+
     float sssStrength = mix(0.55, 0.08, melanin);
     float skinGrain   = mix(0.25, 0.60, melanin);
 
@@ -245,6 +257,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float satAmount = mix(0.4, 1.0, focusMix);
     vec3 grey = vec3(luma(color));
     color = mix(grey, color, satAmount) * dimAmount;
+
+    // ── Encode cursor UV into pixel (0,0) for compute shader ─────────────
+    // Compute reads this from feedback next frame to know light position
+    vec2 cursorUV = iCurrentCursor.xy / iResolution.xy;
+    if (fragCoord.x < 1.0 && fragCoord.y < 1.0) {
+        fragColor = vec4(cursorUV, 0.0, 1.0);
+        return;
+    }
 
     fragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
 }

@@ -1,0 +1,56 @@
+// tattoo.compute.msl — per-pixel melanin accumulation (tanning)
+//
+// State texture (iChannel2):
+//   R = accumulated tan exposure (0 = fresh, 1 = fully tanned)
+//   GBA = unused
+//
+// Cursor UV is read from feedback pixel (0,0) RG,
+// encoded there by the display shader each frame.
+
+#include <metal_stdlib>
+using namespace metal;
+
+// ── Tuning ────────────────────────────────────────────────────────────────────
+#define TAN_RATE        0.00008f   // base exposure per frame (fair skin)
+#define TAN_RADIUS      0.35f      // UV-space radius of cursor sun influence
+#define TAN_FALLOFF     2.5f       // radial falloff exponent
+#define TAN_MAX         0.55f      // max tan level (never fully dark)
+#define TAN_FADE        0.99998f   // very slow fade per frame (skin recovers over days)
+// ─────────────────────────────────────────────────────────────────────────────
+
+kernel void computeMain(
+    texture2d<float, access::sample> terminal    [[ texture(0) ]],
+    texture2d<float, access::sample> feedback    [[ texture(2) ]],
+    texture2d<float, access::sample> state_read  [[ texture(3) ]],
+    texture2d<float, access::write>  state_write [[ texture(8) ]],
+    uint2 gid [[ thread_position_in_grid ]]
+) {
+    uint W = state_write.get_width();
+    uint H = state_write.get_height();
+    if (gid.x >= W || gid.y >= H) return;
+
+    constexpr sampler smp(filter::linear, address::clamp_to_edge);
+    constexpr sampler near(filter::nearest, address::clamp_to_edge);
+
+    float2 uv = (float2(gid) + 0.5f) / float2(W, H);
+
+    // ── Read cursor UV from feedback pixel (0,0) — encoded by display shader ──
+    float2 encodedUV = float2(0.5f, 0.5f) / float2(W, H);
+    float4 cursorEnc = feedback.sample(near, encodedUV);
+    float2 cursorUV  = cursorEnc.rg;  // cursor position in UV space
+
+    // ── Current tan state ─────────────────────────────────────────────────────
+    float tan = state_read.sample(smp, uv).r;
+
+    // ── Cursor proximity → exposure ───────────────────────────────────────────
+    float aspect = float(W) / float(H);
+    float2 delta = (uv - cursorUV) * float2(aspect, 1.0f);
+    float dist = length(delta);
+    float exposure = pow(max(1.0f - dist / TAN_RADIUS, 0.0f), TAN_FALLOFF);
+
+    // ── Accumulate, fade, clamp ───────────────────────────────────────────────
+    tan = tan * TAN_FADE + exposure * TAN_RATE;
+    tan = clamp(tan, 0.0f, TAN_MAX);
+
+    state_write.write(float4(tan, 0.0f, 0.0f, 1.0f), gid);
+}

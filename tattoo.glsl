@@ -40,8 +40,24 @@ float fbm(vec2 p) {
     return v;
 }
 
+// Body macro-shape: small-of-back concave dip at lower-center, flat at edges.
+// Negative = surface dips away from viewer (concave bowl).
+float bodyHeight(vec2 p) {
+    float cx  = p.x - 0.5;
+    float cy  = p.y - 0.68;                       // dip center in lower half
+    // Envelope: falls to zero at all four edges
+    float ex  = 1.0 - smoothstep(0.15, 0.46, abs(cx));
+    float ey  = smoothstep(0.10, 0.35, p.y) * (1.0 - smoothstep(0.72, 0.96, p.y));
+    float env = ex * ey;
+    // Convex dome shape — small of back rises toward viewer
+    float bowl = exp(-(cx*cx * 9.0 + cy*cy * 5.5)) * 0.55;
+    // Slight side-to-side convex ridge away from dip (the flanks of the back)
+    float flanks = exp(-cx*cx * 1.8) * 0.08 * smoothstep(0.0, 0.4, p.y);
+    return (bowl + flanks) * env;
+}
+
 float skinHeight(vec2 p) {
-    return fbm(p * 8.0) * 0.7 + fbm(p * 55.0) * 0.3;
+    return fbm(p * 8.0) * 0.7 + fbm(p * 55.0) * 0.3 + bodyHeight(p) * 0.8;
 }
 
 // Ink detection: how different is this pixel from the background?
@@ -54,14 +70,55 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 px  = 1.0 / iResolution.xy;
     float aspect = iResolution.x / iResolution.y;
 
-    // Body surface warp — text follows the curve of the skin
-    // Pinch warp — edges curve inward like wrapping around a body
-    // pow(t, k) with k>1 compresses edges toward center, stays in [0,1]
-    // Small of the back — concave hyperbolic warp
-    // tanh S-curve: center expands outward, edges compress, never off-screen
-    float k = 1.8;
-    vec2 uvHyp = 0.5 + tanh((uv - 0.5) * k) / tanh(k * 0.5) * 0.5;
-    vec2 uvWarp = mix(uv, uvHyp, 0.45);
+    // ── Breath waveform — computed once, used per node ────────────────────
+    float breathPeriod = 30.0;
+    float tau = 6.28318 / breathPeriod;
+    float raw = sin(iTime * tau) * 0.72
+              + sin(iTime * tau * 2.0 + 1.1) * 0.18
+              + sin(iTime * tau * 3.0 + 0.5) * 0.06;
+    float breath = clamp((raw - 0.14) / 0.82, -1.0, 1.0);
+
+    // ── Body mesh deformation ─────────────────────────────────────────────
+    // 8×6 grid. Boundary nodes pinned → edges stay flat.
+    // Interior nodes breathe radially from the back's center.
+    #define MESH_COLS 8
+    #define MESH_ROWS 6
+    vec2  dipCenter = vec2(0.5, 0.68);
+    vec2  meshDisp  = vec2(0.0);
+    float totalW    = 0.0;
+    float bEps      = 0.02;
+    for (int mi = 0; mi < MESH_COLS; mi++) {
+        for (int mj = 0; mj < MESH_ROWS; mj++) {
+            vec2 nodeUV = vec2(float(mi) / float(MESH_COLS - 1),
+                               float(mj) / float(MESH_ROWS - 1));
+            bool onEdge = (mi == 0 || mi == MESH_COLS-1 || mj == 0 || mj == MESH_ROWS-1);
+            // Base: follow bodyHeight gradient so text wraps the shape
+            float gx = (bodyHeight(nodeUV + vec2(bEps,0.0)) - bodyHeight(nodeUV - vec2(bEps,0.0))) / (2.0*bEps);
+            float gy = (bodyHeight(nodeUV + vec2(0.0,bEps)) - bodyHeight(nodeUV - vec2(0.0,bEps))) / (2.0*bEps);
+            vec2 baseDisp = -vec2(gx, gy) * 0.018;
+            vec2 drift = vec2(0.0);
+            if (!onEdge) {
+                // Breath: radial from dip center, falls off with distance
+                vec2  toNode    = nodeUV - dipCenter;
+                float cDist     = length(toNode * vec2(1.0, 1.2));
+                float breathEnv = exp(-cDist * cDist * 1.2);
+                vec2  breathDir = cDist > 0.001 ? normalize(toNode) : vec2(0.0, 1.0);
+                drift = breathDir * breath * breathEnv * 0.028;
+                // Small per-node muscle fidget
+                float seed  = float(mi * 7 + mj * 13);
+                float freq  = 0.04 + hash(vec2(seed, seed*0.7)) * 0.025;
+                float fphase = hash(vec2(seed*1.3, seed*0.4)) * 6.283;
+                vec2  dir   = normalize(vec2(hash(vec2(seed, 1.0)) - 0.5,
+                                             hash(vec2(seed, 2.0)) - 0.5));
+                drift += dir * 0.002 * sin(iTime * freq + fphase);
+            }
+            float d2 = dot(uv - nodeUV, uv - nodeUV);
+            float w  = exp(-d2 * 28.0);
+            meshDisp += (baseDisp + drift) * w;
+            totalW   += w;
+        }
+    }
+    vec2 uvWarp = uv + (totalW > 0.0 ? meshDisp / totalW : vec2(0.0));
 
     // ── Age — continuous, no bands ────────────────────────────────────────
     float age = clamp(((1.0 - uv.y) * BASE_AGE + iTime * DRIFT_RATE) / (BASE_AGE + 1.0), 0.0, 1.0);
@@ -118,18 +175,43 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
     // Tan disabled — TODO: revisit compute approach to avoid visible disc artifact
 
+    // ── Melanin spots — freckles & moles as local melanin concentration ───
+    // Same chromophore, just denser. Small radius → freckle, large → mole.
+    // Cluster toward center (backs have more spots mid-torso than edges).
+    // Deepen on fair skin over time; barely visible on deep melanin.
+    #define SPOT_COUNT 90
+    float spotAge  = clamp(iTime / 60.0, 0.0, 1.0);
+    float spotFair = (1.0 - melanin) * (1.0 - melanin);  // quadratic: strong on fair only
+    float spotMelanin = 0.0;
+    for (int si = 0; si < SPOT_COUNT; si++) {
+        vec2  s    = vec2(float(si) * 1.618, float(si) * 2.399);
+        // Cluster toward center: map uniform random to center-weighted distribution
+        vec2  raw  = vec2(hash(s), hash(s + 7.3));
+        vec2  sUV  = 0.5 + (raw - 0.5) * vec2(0.78, 0.82);
+        float rRaw = hash(s + 3.1);
+        // Power law: most are tiny freckles, a few larger moles
+        float fR   = mix(0.0018, 0.010, rRaw * rRaw * rRaw);
+        float fDist= length((uvWarp - sUV) * vec2(aspect, 1.0));
+        float spot = smoothstep(fR, fR * 0.15, fDist);
+        // Larger spots darker, smaller ones lighter
+        spotMelanin += spot * mix(0.06, 0.28, rRaw);
+    }
+    spotMelanin *= spotFair * spotAge;
+
+    float localMelanin = clamp(melanin + spotMelanin, 0.0, 1.0);
+
     float sssStrength = mix(0.55, 0.08, melanin);
     float skinGrain   = mix(0.25, 0.60, melanin);
 
-    // Skin gamut: melanin × warmth
+    // Skin gamut: melanin × warmth — use localMelanin so spots shift through gamut
     // Three-point mix: fair → mid → deep, fully continuous
     vec3 fairTone = mix(vec3(0.94,0.88,0.86), vec3(0.96,0.90,0.80), warmth);
     vec3 midTone  = mix(vec3(0.62,0.46,0.40), vec3(0.70,0.52,0.34), warmth);
     vec3 deepTone = mix(vec3(0.28,0.18,0.16), vec3(0.35,0.22,0.12), warmth);
-    vec3 skinBase = mix(fairTone, mix(midTone, deepTone, clamp(melanin*2.0-1.0, 0.0,1.0)),
-                        smoothstep(0.0, 1.0, melanin));
+    vec3 skinBase = mix(fairTone, mix(midTone, deepTone, clamp(localMelanin*2.0-1.0, 0.0,1.0)),
+                        smoothstep(0.0, 1.0, localMelanin));
 
-    skinBase += (fbm(uv * 120.0) - 0.5) * 0.025 * skinGrain;
+    skinBase += (fbm(uvWarp * 120.0) - 0.5) * 0.025 * skinGrain;
 
     // SSS — sum of 3 gaussians, each wider and redder
     // Narrow: surface detail. Mid: dermis blush. Wide: deep red scatter.
@@ -161,19 +243,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
     // ── Normal map — direct central differences ───────────────────────────
     float eps = 0.014;
-    float hC = skinHeight(uv);
-    float hR = skinHeight(uv + vec2(eps, 0.0));
-    float hU = skinHeight(uv + vec2(0.0, eps));
-    float normalScale = mix(0.10, 0.20, melanin);
-    // Body curvature — convex surface, edges tilt away like a stomach/inner arm
-    vec2  bodyOffset = (uv - 0.5) * vec2(aspect, 1.0);
-    float bodyRadius = 0.90;  // smaller = rounder
-    vec2  bodyTilt   = clamp(bodyOffset / bodyRadius * 0.35, -0.4, 0.4);  // concave — edges tilt toward viewer
-
-
+    float hC = skinHeight(uvWarp);
+    float hR = skinHeight(uvWarp + vec2(eps, 0.0));
+    float hU = skinHeight(uvWarp + vec2(0.0, eps));
+    float normalScale = mix(0.12, 0.22, melanin);
     vec3 normal = normalize(vec3(
-        (hC - hR) * normalScale * aspect + bodyTilt.x,
-        (hU - hC) * normalScale          + bodyTilt.y,
+        (hC - hR) * normalScale * aspect,
+        (hU - hC) * normalScale,
         1.0));
 
     // ── Ambient occlusion — horizon sampling from heightfield ─────────────
@@ -183,7 +259,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     for (int i = 0; i < 8; i++) {
         float a = float(i) * 0.7854;
         vec2 dir = vec2(cos(a), sin(a)) * aoRadius;
-        float hN = skinHeight(uv + dir);
+        float hN = skinHeight(uvWarp + dir);
         ao += clamp((hN - hC) * 1.5, 0.0, 1.0);
     }
     ao = 1.0 - ao / 8.0 * 0.12;
@@ -253,9 +329,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float sat      = mix(0.4, 1.0, focusMix);
     color = mix(vec3(luma(color)), color, sat) * dim;
 
-    // ── Encode sun UV into pixel (0,0) for compute shader (future tanning) ──
+    // ── Encode into reserved pixels ───────────────────────────────────────
     if (fragCoord.x < 1.0 && fragCoord.y < 1.0) {
-        fragColor = vec4(sunUV, 0.0, 1.0);
+        fragColor = vec4(sunUV, 0.0, 1.0);       // (0,0): sun UV for compute
         return;
     }
 

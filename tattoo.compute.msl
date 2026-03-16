@@ -11,7 +11,7 @@
 using namespace metal;
 
 // ── Tuning ────────────────────────────────────────────────────────────────────
-#define TAN_RATE        0.00008f   // base exposure per frame (fair skin)
+#define TAN_RATE        0.00018f   // base exposure per frame (fair skin)
 #define TAN_RADIUS      0.35f      // UV-space radius of cursor sun influence
 #define TAN_FALLOFF     2.5f       // radial falloff exponent
 #define TAN_MAX         0.55f      // max tan level (never fully dark)

@@ -145,7 +145,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float sssStrength = mix(0.55, 0.08, melanin);
     float skinGrain   = mix(0.25, 0.60, melanin);
 
-    vec3 fairCool = vec3(0.98, 0.94, 0.93);  // deep Nordic — cool porcelain
+    vec3 fairCool = vec3(0.94, 0.88, 0.86);  // Nordic — cool, slightly warm rose
     vec3 fairWarm = vec3(0.96, 0.90, 0.80);
     vec3 midCool  = vec3(0.62, 0.46, 0.40);
     vec3 midWarm  = vec3(0.70, 0.52, 0.34);

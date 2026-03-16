@@ -54,12 +54,21 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 px  = 1.0 / iResolution.xy;
     float aspect = iResolution.x / iResolution.y;
 
+    // Body surface warp — text follows the curve of the skin
+    // Pinch warp — edges curve inward like wrapping around a body
+    // pow(t, k) with k>1 compresses edges toward center, stays in [0,1]
+    // Small of the back — concave hyperbolic warp
+    // tanh S-curve: center expands outward, edges compress, never off-screen
+    float k = 1.8;
+    vec2 uvHyp = 0.5 + tanh((uv - 0.5) * k) / tanh(k * 0.5) * 0.5;
+    vec2 uvWarp = mix(uv, uvHyp, 0.45);
+
     // ── Age — continuous, no bands ────────────────────────────────────────
     float age = clamp(((1.0 - uv.y) * BASE_AGE + iTime * DRIFT_RATE) / (BASE_AGE + 1.0), 0.0, 1.0);
     float bleedRadius = age * BLEED_MAX;
 
     // ── Terminal ink ──────────────────────────────────────────────────────
-    vec3 term    = texture(iChannel0, uv).rgb;
+    vec3 term    = texture(iChannel0, uvWarp).rgb;
     vec3 bgColor = iBackgroundColor.rgb;
 
     // Ink mask with 1px AA
@@ -68,7 +77,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     for (int i = -1; i <= 1; i++) {
         for (int j = -1; j <= 1; j++) {
             float w = 1.0 - length(vec2(i,j)) * 0.35;
-            vec2 sUV = clamp(uv + vec2(i,j) * px, 0.001, 0.999);
+            vec2 sUV = clamp(uvWarp + vec2(i,j) * px, 0.001, 0.999);
             aaBlur += inkDetect(texture(iChannel0, sUV).rgb, bgColor) * w;
             aaW += w;
         }
@@ -89,7 +98,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
                 if (r > bleedRadius + 0.5) continue;
                 float w = exp(-dist2 / (sigma2 * 0.5))
                         * smoothstep(bleedRadius + 0.5, bleedRadius - 0.5, r);
-                vec2 sUV = clamp(uv + vec2(i,j) * px * bleedRadius, 0.001, 0.999);
+                vec2 sUV = clamp(uvWarp + vec2(i,j) * px * bleedRadius, 0.001, 0.999);
                 bleedAcc += inkDetect(texture(iChannel0, sUV).rgb, bgColor) * w;
                 bleedW += w;
             }
@@ -130,21 +139,21 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec3 n1 = vec3(0.0); float w1 = 0.0;
     for (int i = -2; i <= 2; i++) { for (int j = -2; j <= 2; j++) {
         float d2 = float(i*i+j*j); float w = exp(-d2 / 2.0);
-        n1 += texture(iChannel0, clamp(uv+vec2(i,j)*px*2.0,0.001,0.999)).rgb * w;
+        n1 += texture(iChannel0, clamp(uvWarp+vec2(i,j)*px*2.0,0.001,0.999)).rgb * w;
         w1 += w; } }
     sss += (n1/w1) * vec3(1.20, 0.80, 0.70) * 0.40;
     // Layer 2: mid (6px), red-shifted
     vec3 n2 = vec3(0.0); float w2 = 0.0;
     for (int i = -2; i <= 2; i++) { for (int j = -2; j <= 2; j++) {
         float d2 = float(i*i+j*j); float w = exp(-d2 / 4.0);
-        n2 += texture(iChannel0, clamp(uv+vec2(i,j)*px*6.0,0.001,0.999)).rgb * w;
+        n2 += texture(iChannel0, clamp(uvWarp+vec2(i,j)*px*6.0,0.001,0.999)).rgb * w;
         w2 += w; } }
     sss += (n2/w2) * vec3(1.50, 0.60, 0.40) * 0.35;
     // Layer 3: wide (14px), deep red only
     vec3 n3 = vec3(0.0); float w3 = 0.0;
     for (int i = -2; i <= 2; i++) { for (int j = -2; j <= 2; j++) {
         float d2 = float(i*i+j*j); float w = exp(-d2 / 6.0);
-        n3 += texture(iChannel0, clamp(uv+vec2(i,j)*px*14.0,0.001,0.999)).rgb * w;
+        n3 += texture(iChannel0, clamp(uvWarp+vec2(i,j)*px*14.0,0.001,0.999)).rgb * w;
         w3 += w; } }
     sss += (n3/w3) * vec3(1.80, 0.30, 0.20) * 0.25;
 
@@ -156,9 +165,15 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float hR = skinHeight(uv + vec2(eps, 0.0));
     float hU = skinHeight(uv + vec2(0.0, eps));
     float normalScale = mix(0.10, 0.20, melanin);
+    // Body curvature — convex surface, edges tilt away like a stomach/inner arm
+    vec2  bodyOffset = (uv - 0.5) * vec2(aspect, 1.0);
+    float bodyRadius = 0.90;  // smaller = rounder
+    vec2  bodyTilt   = clamp(bodyOffset / bodyRadius * 0.35, -0.4, 0.4);  // concave — edges tilt toward viewer
+
+
     vec3 normal = normalize(vec3(
-        (hC - hR) * normalScale * aspect,
-        (hU - hC) * normalScale,
+        (hC - hR) * normalScale * aspect + bodyTilt.x,
+        (hU - hC) * normalScale          + bodyTilt.y,
         1.0));
 
     // ── Ambient occlusion — horizon sampling from heightfield ─────────────

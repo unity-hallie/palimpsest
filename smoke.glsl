@@ -50,23 +50,6 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float fallB = max(dot(center, vec2(cos(baseAngle + 3.14), sin(baseAngle + 3.14))), 0.0) * edgeMask;
     vec3 neonColor = neonA * fallA + neonB * fallB;
 
-    // ── Moon with accurate phase ──────────────────────────────────────────
-    // Position: slow drift, per-terminal placement
-    float moonSeed = hash11(launchSeed * 3.91);
-    vec2 moonPos = vec2(0.15 + moonSeed * 0.7, 0.75 + moonSeed * 0.15);
-    moonPos += vec2(sin(iTime * 0.003), cos(iTime * 0.002)) * 0.02;
-
-    // Soft glowing disc with radial falloff
-    float aspect = iResolution.x / iResolution.y;
-    float moonDist = length((uv - moonPos) * vec2(aspect, 1.0));
-    float disc = smoothstep(MOON_SIZE, 0.0, moonDist); // soft radial glow
-    float core = smoothstep(MOON_SIZE * 0.5, 0.0, moonDist); // bright center
-    float moonMask = mix(disc * 0.5, 1.0, core); // halo + bright core
-
-    // Warm moonlight, hazed by smoke
-    vec3 moonColor = vec3(0.9, 0.85, 0.7) * MOON_BRIGHTNESS;
-    float moonHaze = 1.0 - density * 0.6;
-
     // ── Text dimmed by scattering ─────────────────────────────────────────
     float scatter = density * textBright;
     vec3 color = term * (1.0 - scatter * 0.4);
@@ -114,8 +97,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     }
     godRays /= 72.0;
 
-    // ── Background layers (behind smoke) ────────────────────────────────
-    color += moonColor * moonMask * moonHaze;
+    // ── Background neon layer ─────────────────────────────────────────────
     color += neonColor * NEON_STRENGTH * 0.12;
 
     // ── Smoke absorption — thick smoke darkens background ────────────────

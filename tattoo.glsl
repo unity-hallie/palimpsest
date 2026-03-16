@@ -16,10 +16,10 @@
 #define BLEED_MAX       2.5    // max pixel bleed radius at oldest age
 #define BLUE_SHIFT_MAX  0.5    // max blue shift at top of screen
 #define LIGHT_HEIGHT    1.2    // virtual z-distance of light above surface
-#define DIFFUSE_STR     0.10   // Lambert diffuse strength
-#define SPECULAR_STR    0.06   // Blinn-Phong specular strength
+#define DIFFUSE_STR     0.38   // Lambert diffuse strength
+#define SPECULAR_STR    0.10   // Blinn-Phong specular strength
 #define SPECULAR_EXP    28.0   // specular shininess
-#define AMBIENT         0.92   // ambient light floor
+#define AMBIENT         0.55   // ambient light floor
 #define INK_MIN_LUMA    0.55   // minimum ink brightness on dark skin
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -306,12 +306,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
     float localMelanin = clamp(melanin + spotMelanin, 0.0, 1.0);
 
-    float sssStrength = mix(0.55, 0.08, melanin);
+    float sssStrength = mix(0.35, 0.08, melanin);
     float skinGrain   = mix(0.25, 0.60, melanin);
 
     // Skin gamut: melanin × warmth — use localMelanin so spots shift through gamut
     // Three-point mix: fair → mid → deep, fully continuous
-    vec3 fairTone = mix(vec3(0.94,0.88,0.86), vec3(0.96,0.90,0.80), warmth);
+    vec3 fairTone = mix(vec3(0.93,0.88,0.865), vec3(0.94,0.89,0.855), warmth);
     vec3 midTone  = mix(vec3(0.62,0.46,0.40), vec3(0.70,0.52,0.34), warmth);
     vec3 deepTone = mix(vec3(0.16,0.10,0.09), vec3(0.20,0.13,0.08), warmth);
     vec3 skinBase = mix(fairTone, mix(midTone, deepTone, clamp(localMelanin*2.0-1.0, 0.0,1.0)),
@@ -390,57 +390,18 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     }
     ao = 1.0 - ao / 8.0 * 0.12;
 
-    // ── Lighting — offscreen sun, 2-minute day/night cycle ────────────────
-    float sunT    = iTime / 120.0 * 6.28318;  // full cycle in 120s
-    float sunH    = sin(sunT);                 // elevation: >0 above horizon
-    float dayness = smoothstep(-0.15, 0.25, sunH);
+    // ── Lighting — window light from top-left ──────────────────────────────
+    vec2  sunUV = vec2(-0.3, -0.3);  // off-screen top-left (window)
+    vec3 lightDir = normalize(vec3(sunUV - uv, LIGHT_HEIGHT * 2.5));
 
-    // Sun moves left→right as it rises, right→left as it sets
-    vec2  sunUV = vec2(0.5 + 0.7 * cos(sunT), 0.5 - 0.55 * sunH);
-
-    // Golden hour: warm when near horizon, white-blue at noon
-    float elevation   = clamp(sunH, 0.0, 1.0);
-    float goldenHour  = smoothstep(0.35, 0.0, elevation) * dayness;
-    vec3  noonColor   = vec3(1.00, 0.97, 0.92);              // bright neutral
-    vec3  goldenColor = vec3(1.00, 0.72, 0.35);              // deep golden
-    vec3  dawnColor   = vec3(1.00, 0.55, 0.30);              // redder at horizon
-    vec3  dayColor    = mix(noonColor, mix(goldenColor, dawnColor, goldenHour), goldenHour);
-    vec3  nightColor  = vec3(0.55, 0.65, 0.90);              // cool moonlight
-    vec3  lightColor  = mix(nightColor, dayColor, dayness);
-
-    float nightAmbient = AMBIENT * 0.45;
-    float ambientLevel = mix(nightAmbient, AMBIENT, dayness);
-
-    vec3 lightDir = normalize(vec3(sunUV - uv, LIGHT_HEIGHT));
-
-    // Wrapped diffuse — terminator is a smooth sine wave, never fully dark
-    // Sun contribution
     float diffuse  = (dot(normal, lightDir) * 0.5 + 0.5) * DIFFUSE_STR;
     vec3  halfDir  = normalize(lightDir + vec3(0,0,1));
     float specular = pow(max(dot(normal, halfDir), 0.0), SPECULAR_EXP)
                    * SPECULAR_STR * mix(1.0, 0.3, melanin)
                    * (1.0 - inkMask * 0.85);
 
-    // Artificial light — fades in as sun sets
-    float nightness = 1.0 - dayness;
-    float flicker = 1.0
-        + sin(iTime * 2.1)  * 0.025
-        + sin(iTime * 3.7)  * 0.015
-        + sin(iTime * 1.3)  * 0.035;
-    vec2  lampUV   = vec2(1.15, 0.45);          // off-screen right, mid-height
-    vec3  lampDir  = normalize(vec3(lampUV - uv, LIGHT_HEIGHT * 0.6));
-    vec3  lampHalf = normalize(lampDir + vec3(0,0,1));
-    float lampDiff = (dot(normal, lampDir) * 0.5 + 0.5) * DIFFUSE_STR * 3.2;
-    float lampSpec = pow(max(dot(normal, lampHalf), 0.0), SPECULAR_EXP)
-                   * SPECULAR_STR * mix(1.2, 0.3, melanin)
-                   * (1.0 - inkMask * 0.85);
-    vec3  lampColor   = vec3(1.0, 0.72, 0.38) * flicker;  // incandescent ~2700K
-    float lampLighting = (lampDiff + lampSpec) * nightness;
-
-    float lighting = clamp(ambientLevel + diffuse * dayness + specular * dayness + lampLighting, 0.0, 1.2);
-    vec3 sunTint   = mix(vec3(1.0), lightColor, 0.4);
-    vec3 lampTint  = mix(vec3(1.0), lampColor,  0.5);
-    vec3 lightTint = mix(sunTint, lampTint, nightness * smoothstep(0.0, 0.3, nightness)) * lighting;
+    float lighting = clamp(AMBIENT + diffuse + specular, 0.0, 1.15);
+    vec3  lightTint = vec3(1.0, 0.99, 0.95) * lighting;  // warm window light
 
     // ── Composite ─────────────────────────────────────────────────────────
     // Bleed halo: ink bleeds into dermis just outside the glyph edge.

@@ -84,6 +84,87 @@ float inkDetect(vec3 s, vec3 bg) {
     return smoothstep(0.04, 0.22, max(abs(luma(s) - luma(bg)), length(s - bg) * 0.7));
 }
 
+// Distance from p to line segment [a,b]
+float segDist(vec2 p, vec2 a, vec2 b) {
+    vec2 ab = b - a, ap = p - a;
+    return length(ap - ab * clamp(dot(ap, ab) / dot(ab, ab), 0.0, 1.0));
+}
+
+// Parametric vein curve — traces a smooth meander from start to end.
+// Multi-scale (fractal) sinusoidal displacement perpendicular to path axis:
+//   octave 1: slow lazy bend  (full amplitude)
+//   octave 2: medium ripple   (half amplitude)
+//   octave 3: fine wiggle     (quarter amplitude)
+// 40 samples → smooth continuous river appearance.
+// Parametric vein curve — continuous distance field via segment-to-segment tracing.
+// Meander is 3-octave fractal sinusoid perpendicular to the path axis.
+// Wider gaussian (sigma = w*2) compensates for no external blur pass —
+// soft subsurface look without the cost of multiple veinField calls.
+float veinCurve(vec2 q, vec2 s, vec2 e, float amp, float freq, float w) {
+    vec2 along = e - s;
+    vec2 perp  = vec2(-along.y, along.x) / max(length(along), 0.001);
+    float minD = 1e9;
+    vec2 prev  = s;
+    for (int i = 1; i < 24; i++) {
+        float t   = float(i) / 23.0;
+        float d   = amp      * sin(t * freq * 6.28318)
+                  + amp*0.5  * sin(t * freq * 6.28318 * 2.0 + 1.7)
+                  + amp*0.25 * sin(t * freq * 6.28318 * 4.0 + 3.1);
+        vec2 cur  = s + along * t + perp * d;
+        minD = min(minD, segDist(q, prev, cur));
+        prev = cur;
+    }
+    return exp(-minD * minD / (w * w * 8.0));
+}
+float veinBranch(vec2 q, vec2 s, vec2 e, float amp, float freq, float w) {
+    vec2 along = e - s;
+    vec2 perp  = vec2(-along.y, along.x) / max(length(along), 0.001);
+    float minD = 1e9;
+    vec2 prev  = s;
+    for (int i = 1; i < 12; i++) {
+        float t   = float(i) / 11.0;
+        float d   = amp      * sin(t * freq * 6.28318)
+                  + amp*0.5  * sin(t * freq * 6.28318 * 2.0 + 2.3)
+                  + amp*0.25 * sin(t * freq * 6.28318 * 4.0 + 0.8);
+        vec2 cur  = s + along * t + perp * d;
+        minD = min(minD, segDist(q, prev, cur));
+        prev = cur;
+    }
+    return exp(-minD * minD / (w * w * 8.0));
+}
+
+// Vein network in aspect-corrected UV space.
+float veinField(vec2 p, float asp) {
+    vec2 q = vec2(p.x * asp, p.y);
+    #define A(x) ((x)*asp)   // aspect-correct x
+    float v = 0.0;
+
+    // max() instead of += so overlapping veins don't compound
+    #define VC(s,e,a,f,w) v = max(v, veinCurve(q,s,e,a,f,w))
+    #define VB(s,e,a,f,w) v = max(v, veinBranch(q,s,e,a,f,w))
+
+    // PRIMARY diagonal trunk — crosses right-to-left across the back
+    VC(vec2(A(0.76),0.88), vec2(A(0.26),0.10), 0.055, 2.1, 0.013);
+
+    // SECONDARY left — feeds in from below-left
+    VC(vec2(A(0.22),0.85), vec2(A(0.40),0.35), 0.038, 2.8, 0.010);
+
+    // SECONDARY right — different meander character
+    VC(vec2(A(0.80),0.80), vec2(A(0.64),0.22), 0.042, 1.6, 0.010);
+
+    // BRANCHES
+    VB(vec2(A(0.58),0.55), vec2(A(0.74),0.62), 0.022, 2.2, 0.006);
+    VB(vec2(A(0.48),0.42), vec2(A(0.31),0.50), 0.018, 2.5, 0.006);
+    VB(vec2(A(0.66),0.70), vec2(A(0.84),0.65), 0.016, 2.8, 0.005);
+    VB(vec2(A(0.30),0.65), vec2(A(0.14),0.60), 0.015, 2.6, 0.004);
+
+    #undef VC
+    #undef VB
+
+    #undef A
+    return clamp(v, 0.0, 1.0);
+}
+
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 uv  = fragCoord / iResolution.xy;
     vec2 px  = 1.0 / iResolution.xy;
@@ -238,6 +319,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
                         smoothstep(0.0, 1.0, localMelanin));
 
     skinBase += (fbm(uvWarp * 120.0) - 0.5) * 0.025 * skinGrain;
+
+    // ── Veins — subsurface branching paths, scatter through SSS ──────────
+    // Applied before SSS so the three gaussian passes blur and soften them —
+    // they read as something seen through translucent tissue, not drawn lines.
+    // Visible only on fair skin: (1-melanin)². Move with mesh via uvWarp.
+    float veinFair = (1.0 - melanin) * (1.0 - melanin);
+    // Slight organic warp so paths curve naturally rather than staying rigid
+    float vMask = veinField(uvWarp, aspect) * veinFair * (1.0 - inkMask * 0.85);
+    // Desaturated cool shadow — visible but not vivid
+    skinBase += vMask * vec3(-0.018, -0.013, 0.034);
 
     // SSS — sum of 3 gaussians, each wider and redder
     // Narrow: surface detail. Mid: dermis blush. Wide: deep red scatter.

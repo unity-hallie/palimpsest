@@ -163,19 +163,26 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
     // ── Lighting — offscreen sun, 2-minute day/night cycle ────────────────
     float sunT    = iTime / 120.0 * 6.28318;  // full cycle in 120s
-    // Sun traces an arc: x swings across, y rises/sets (y=0 is top in UV)
-    vec2  sunUV   = vec2(0.5 + 0.7 * cos(sunT), 0.5 - 0.55 * sin(sunT));
-    float sunH    = sin(sunT);  // >0 = above horizon, <0 = below
-    float dayness = smoothstep(-0.15, 0.25, sunH);  // smooth dawn/dusk
+    float sunH    = sin(sunT);                 // elevation: >0 above horizon
+    float dayness = smoothstep(-0.15, 0.25, sunH);
 
-    vec3 lightDir  = normalize(vec3(sunUV - uv, LIGHT_HEIGHT));
-    // Day: warm golden. Night: cool blue moonlight.
-    vec3 dayColor  = mix(vec3(1.0,0.85,0.65), vec3(1.0,0.97,0.90), dayness);  // sunrise→noon
-    vec3 nightColor = vec3(0.55, 0.65, 0.90);
-    vec3 lightColor = mix(nightColor, dayColor, dayness);
-    // Night ambient drops, day ambient is full
+    // Sun moves left→right as it rises, right→left as it sets
+    vec2  sunUV = vec2(0.5 + 0.7 * cos(sunT), 0.5 - 0.55 * sunH);
+
+    // Golden hour: warm when near horizon, white-blue at noon
+    float elevation   = clamp(sunH, 0.0, 1.0);
+    float goldenHour  = smoothstep(0.35, 0.0, elevation) * dayness;
+    vec3  noonColor   = vec3(1.00, 0.97, 0.92);              // bright neutral
+    vec3  goldenColor = vec3(1.00, 0.72, 0.35);              // deep golden
+    vec3  dawnColor   = vec3(1.00, 0.55, 0.30);              // redder at horizon
+    vec3  dayColor    = mix(noonColor, mix(goldenColor, dawnColor, goldenHour), goldenHour);
+    vec3  nightColor  = vec3(0.55, 0.65, 0.90);              // cool moonlight
+    vec3  lightColor  = mix(nightColor, dayColor, dayness);
+
     float nightAmbient = AMBIENT * 0.45;
     float ambientLevel = mix(nightAmbient, AMBIENT, dayness);
+
+    vec3 lightDir = normalize(vec3(sunUV - uv, LIGHT_HEIGHT));
 
     // Wrapped diffuse — terminator is a smooth sine wave, never fully dark
     // Sun contribution
@@ -191,10 +198,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         + sin(iTime * 2.1)  * 0.025
         + sin(iTime * 3.7)  * 0.015
         + sin(iTime * 1.3)  * 0.035;
-    vec2  lampUV   = vec2(0.72, 0.28);
-    vec3  lampDir  = normalize(vec3(lampUV - uv, LIGHT_HEIGHT * 0.8));
+    vec2  lampUV   = vec2(1.15, 0.45);          // off-screen right, mid-height
+    vec3  lampDir  = normalize(vec3(lampUV - uv, LIGHT_HEIGHT * 0.6));
     vec3  lampHalf = normalize(lampDir + vec3(0,0,1));
-    float lampDiff = (dot(normal, lampDir) * 0.5 + 0.5) * DIFFUSE_STR * 2.2;
+    float lampDiff = (dot(normal, lampDir) * 0.5 + 0.5) * DIFFUSE_STR * 3.2;
     float lampSpec = pow(max(dot(normal, lampHalf), 0.0), SPECULAR_EXP)
                    * SPECULAR_STR * mix(1.2, 0.3, melanin)
                    * (1.0 - inkMask * 0.85);

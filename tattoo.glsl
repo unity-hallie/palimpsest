@@ -167,7 +167,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // Ink color: blue-shift fades out in bottom third
     float blueShift = age * BLUE_SHIFT_MAX * smoothstep(0.65, 0.25, uv.y);
     float fringe = clamp(bleedMask - inkMask, 0.0, 1.0);
-    vec3 inkColor = clamp(term + vec3(-1.0, 0.0, 1.0) * blueShift * (inkMask + fringe) * vec3(0.4, 0.0, 1.0), 0.0, 1.0);
+    // Blue shift: rotate hue toward cool/blue while preserving luma.
+    // Mix toward a blue-tinted version, then rescale to original brightness.
+    float shiftAmt = blueShift * clamp(inkMask + fringe, 0.0, 1.0);
+    vec3 termShifted = term * vec3(0.65, 0.88, 1.20);
+    float termLuma   = max(luma(term), 0.001);
+    termShifted *= termLuma / max(luma(termShifted), 0.001);  // luma-preserve
+    vec3 inkColor = clamp(mix(term, termShifted, shiftAmt), 0.0, 1.0);
 
     // ── Skin: continuous chromophore model ────────────────────────────────
     float bgLuma  = luma(bgColor);
@@ -327,7 +333,9 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // Also boost ink brightness on deep skin so mid-tone colors don't sink into substrate.
     float inkEmbed  = mix(0.55, 0.92, melanin);
     vec3  inkBoosted = mix(inkColor, inkColor + (inkColor - skinBase) * 0.3, melanin);
-    color = mix(color, mix(skinBase * inkBoosted * 1.6, inkBoosted, inkEmbed), inkMask);
+    // Age fade: old ink ghosts back toward skin (top of screen = older)
+    float inkFade = 1.0 - smoothstep(0.33, 0.85, 1.0 - uv.y) * 0.45;
+    color = mix(color, mix(skinBase * inkBoosted * 1.6, inkBoosted, inkEmbed), inkMask * inkFade);
     // Light tint applies to skin; ink pixels get only a gentle tint so colors stay legible
     vec3 inkLightTint = mix(lightTint, vec3(luma(lightTint) * 0.5 + 0.5), inkMask * melanin);
     color *= (1.0 - inkMask * 0.05) * inkLightTint;

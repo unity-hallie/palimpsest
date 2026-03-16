@@ -20,6 +20,7 @@
 #define SPECULAR_STR    0.06   // Blinn-Phong specular strength
 #define SPECULAR_EXP    28.0   // specular shininess
 #define AMBIENT         0.92   // ambient light floor
+#define INK_MIN_LUMA    0.55   // minimum ink brightness on dark skin
 // ─────────────────────────────────────────────────────────────────────────────
 
 float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
@@ -226,21 +227,19 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float bleedRadius = age * BLEED_MAX;
 
     // ── Terminal ink ──────────────────────────────────────────────────────
-    vec3 term    = texture(iChannel0, uvWarp).rgb;
     vec3 bgColor = iBackgroundColor.rgb;
 
-    // Ink mask with 1px AA
-    float inkMask = inkDetect(term, bgColor);
-    float aaBlur = 0.0, aaW = 0.0;
-    for (int i = -1; i <= 1; i++) {
-        for (int j = -1; j <= 1; j++) {
-            float w = 1.0 - length(vec2(i,j)) * 0.35;
-            vec2 sUV = clamp(uvWarp + vec2(i,j) * px, 0.001, 0.999);
-            aaBlur += inkDetect(texture(iChannel0, sUV).rgb, bgColor) * w;
-            aaW += w;
-        }
-    }
-    inkMask = mix(inkMask, aaBlur / aaW, 0.4);
+    // 2×2 rotated-grid supersample to kill warp moiré
+    vec2 ssOff = px * 0.375;
+    vec3 t0 = texture(iChannel0, uvWarp + vec2(-ssOff.x, ssOff.y)).rgb;
+    vec3 t1 = texture(iChannel0, uvWarp + vec2( ssOff.x, ssOff.y)).rgb;
+    vec3 t2 = texture(iChannel0, uvWarp + vec2(-ssOff.x,-ssOff.y)).rgb;
+    vec3 t3 = texture(iChannel0, uvWarp + vec2( ssOff.x,-ssOff.y)).rgb;
+    vec3 term = (t0 + t1 + t2 + t3) * 0.25;
+
+    // Ink mask from supersampled detection
+    float inkMask = (inkDetect(t0, bgColor) + inkDetect(t1, bgColor)
+                   + inkDetect(t2, bgColor) + inkDetect(t3, bgColor)) * 0.25;
 
     // Bleed: radial gaussian — kernel size scales with age to save samples
     // fresh (age~0): skip entirely. mid: 3×3. old: 5×5.
@@ -269,7 +268,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float fringe = clamp(bleedMask - inkMask, 0.0, 1.0);
     // Blue shift: rotate hue toward cool/blue while preserving luma.
     // Mix toward a blue-tinted version, then rescale to original brightness.
-    float shiftAmt = blueShift * clamp(inkMask + fringe, 0.0, 1.0);
+    float shiftAmt = blueShift * clamp(inkMask + fringe, 0.0, 1.0) * mix(1.0, 0.4, 1.0 - luma(bgColor));
     vec3 termShifted = term * vec3(0.65, 0.88, 1.20);
     float termLuma   = max(luma(term), 0.001);
     termShifted *= termLuma / max(luma(termShifted), 0.001);  // luma-preserve
@@ -318,6 +317,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec3 skinBase = mix(fairTone, mix(midTone, deepTone, clamp(localMelanin*2.0-1.0, 0.0,1.0)),
                         smoothstep(0.0, 1.0, localMelanin));
 
+    // Anchor skin brightness to actual background — dark bg stays dark
+    skinBase *= mix(1.0, luma(skinBase) > 0.001 ? bgLuma / luma(skinBase) : 1.0, 0.4);
     skinBase += (fbm(uvWarp * 120.0) - 0.5) * 0.025 * skinGrain;
 
     // ── Veins — subsurface branching paths, scatter through SSS ──────────
@@ -333,30 +334,37 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // SSS — sum of 3 gaussians, each wider and redder
     // Narrow: surface detail. Mid: dermis blush. Wide: deep red scatter.
     // RGB weights per layer: red travels furthest, blue barely at all.
+    // Samples use bgColor where ink is detected to prevent text bleeding into skin.
     vec3 sss = vec3(0.0);
     // Layer 1: narrow (2px), full spectrum
     vec3 n1 = vec3(0.0); float w1 = 0.0;
     for (int i = -2; i <= 2; i++) { for (int j = -2; j <= 2; j++) {
         float d2 = float(i*i+j*j); float w = exp(-d2 / 2.0);
-        n1 += texture(iChannel0, clamp(uvWarp+vec2(i,j)*px*2.0,0.001,0.999)).rgb * w;
+        vec2 sUV = clamp(uvWarp+vec2(i,j)*px*2.0,0.001,0.999);
+        vec3 s = texture(iChannel0, sUV).rgb;
+        n1 += mix(s, bgColor, inkDetect(s, bgColor)) * w;
         w1 += w; } }
     sss += (n1/w1) * vec3(1.20, 0.80, 0.70) * 0.40;
     // Layer 2: mid (6px), red-shifted
     vec3 n2 = vec3(0.0); float w2 = 0.0;
     for (int i = -2; i <= 2; i++) { for (int j = -2; j <= 2; j++) {
         float d2 = float(i*i+j*j); float w = exp(-d2 / 4.0);
-        n2 += texture(iChannel0, clamp(uvWarp+vec2(i,j)*px*6.0,0.001,0.999)).rgb * w;
+        vec2 sUV = clamp(uvWarp+vec2(i,j)*px*6.0,0.001,0.999);
+        vec3 s = texture(iChannel0, sUV).rgb;
+        n2 += mix(s, bgColor, inkDetect(s, bgColor)) * w;
         w2 += w; } }
     sss += (n2/w2) * vec3(1.50, 0.60, 0.40) * 0.35;
     // Layer 3: wide (14px), deep red only
     vec3 n3 = vec3(0.0); float w3 = 0.0;
     for (int i = -2; i <= 2; i++) { for (int j = -2; j <= 2; j++) {
         float d2 = float(i*i+j*j); float w = exp(-d2 / 6.0);
-        n3 += texture(iChannel0, clamp(uvWarp+vec2(i,j)*px*14.0,0.001,0.999)).rgb * w;
+        vec2 sUV = clamp(uvWarp+vec2(i,j)*px*14.0,0.001,0.999);
+        vec3 s = texture(iChannel0, sUV).rgb;
+        n3 += mix(s, bgColor, inkDetect(s, bgColor)) * w;
         w3 += w; } }
     sss += (n3/w3) * vec3(1.80, 0.30, 0.20) * 0.25;
 
-    skinBase += sss * sssStrength * 0.18 * (1.0 - bleedMask);
+    skinBase += sss * sssStrength * 0.18 * (1.0 - inkMask);
 
     // ── Normal map — direct central differences ───────────────────────────
     float cycleCount = iTime / 30.0;  // breath cycles elapsed
@@ -435,21 +443,42 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec3 lightTint = mix(sunTint, lampTint, nightness * smoothstep(0.0, 0.3, nightness)) * lighting;
 
     // ── Composite ─────────────────────────────────────────────────────────
-    // Bleed halo: fair skin → darken around letters (ink sinks into dermis).
-    // Deep skin → lighten toward ink color (light ink scatters into dark dermis).
-    vec3 bleedTarget = mix(skinBase * 0.76, mix(skinBase, inkColor, 0.55), melanin);
-    vec3 color = mix(skinBase, bleedTarget, bleedMask * 0.7);
+    // Bleed halo: ink bleeds into dermis just outside the glyph edge.
+    // On fair skin the fringe darkens (ink sinks in visibly).
+    // On deep skin the effect vanishes — dark ink on dark dermis leaves no ring.
+    float bleedVis = (1.0 - melanin) * (1.0 - melanin);  // zero on dark skin (high melanin)
+    vec3 bleedTarget = skinBase * mix(1.0, 0.76, bleedVis);
+    vec3 color = mix(skinBase, bleedTarget, bleedMask * 0.7 * bleedVis);
     color *= ao;
     // Ink embed: fair skin = ink tinted by dermis; deep skin = ink reads directly.
     // Also boost ink brightness on deep skin so mid-tone colors don't sink into substrate.
-    float inkEmbed  = mix(0.55, 0.92, melanin);
-    vec3  inkBoosted = mix(inkColor, inkColor + (inkColor - skinBase) * 0.3, melanin);
+    float inkEmbed  = mix(0.55, 1.0, melanin);  // dark skin: pure ink, no multiply blend
+    // Lift dark ink toward readable brightness on dark skin
+    float inkLuma = luma(inkColor);
+    float minLuma = melanin * INK_MIN_LUMA;
+    float lift = max(0.0, minLuma - inkLuma) / max(inkLuma, 0.01);
+    vec3  inkLifted = inkColor * (1.0 + lift);
+    vec3  inkBoosted = mix(inkLifted, inkLifted + (inkLifted - skinBase) * 0.5, melanin);
     // Age fade: old ink ghosts back toward skin (top of screen = older)
-    float inkFade = 1.0 - smoothstep(0.33, 0.85, 1.0 - uv.y) * 0.45;
+    float fadeAmount = mix(0.28, 0.05, melanin);  // fair skin fades more, dark skin holds ink
+    float inkFade = 1.0 - smoothstep(0.18, 0.92, 1.0 - uv.y) * fadeAmount;
     color = mix(color, mix(skinBase * inkBoosted * 1.6, inkBoosted, inkEmbed), inkMask * inkFade);
+    // Mid-tone ink glows harder — saturated colors pop in the dermis
+    float midPop = 1.0 + smoothstep(0.15, 0.4, inkLuma) * smoothstep(0.7, 0.4, inkLuma) * 1.5;
+    // Ink luminosity — letters glow faintly on dark skin, as if lit from within
+    float skinProximity = 1.0 - clamp(length(inkColor - skinBase) * 3.0, 0.0, 1.0);
+    float inkGlow = inkMask * melanin * mix(0.2, 0.7, skinProximity) * midPop;
+    color += inkBoosted * inkGlow;
+    // Ink light sinks into surrounding skin through the bleed fringe
+    float skinGlow = fringe * melanin * 0.35 * midPop;
+    color += inkBoosted * skinGlow;
     // Light tint applies to skin; ink pixels get only a gentle tint so colors stay legible
-    vec3 inkLightTint = mix(lightTint, vec3(luma(lightTint) * 0.5 + 0.5), inkMask * melanin);
-    color *= (1.0 - inkMask * 0.05) * inkLightTint;
+    // Dark skin: ink resists both color tint and brightness variation from lighting
+    float tintResist = inkMask * mix(0.5, 0.9, melanin);
+    vec3 inkLightTint = mix(lightTint, vec3(luma(lightTint) * 0.5 + 0.5), tintResist);
+    float lightResist = inkMask * melanin * 0.35;
+    vec3 flatLight = mix(inkLightTint, vec3(1.0), lightResist);
+    color *= (1.0 - inkMask * 0.05) * flatLight;
 
     // ── Focus dim ─────────────────────────────────────────────────────────
     float focusT   = clamp((iTime - iTimeFocus) * 1.5, 0.0, 1.0);
@@ -458,7 +487,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float sat      = mix(0.4, 1.0, focusMix);
     color = mix(vec3(luma(color)), color, sat) * dim;
 
-    // ── Encode into reserved pixels ───────────────────────────────────────
+// ── Encode into reserved pixels ───────────────────────────────────────
     if (fragCoord.x < 1.0 && fragCoord.y < 1.0) {
         fragColor = vec4(sunUV, 0.0, 1.0);       // (0,0): sun UV for compute
         return;

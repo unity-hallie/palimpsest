@@ -37,7 +37,7 @@ float noise(vec2 p) {
 
 float fbm(vec2 p) {
     float v = 0.0, a = 0.5;
-    for (int i = 0; i < 5; i++) { v += a * noise(p); p *= 2.1; a *= 0.5; }
+    for (int i = 0; i < 3; i++) { v += a * noise(p); p *= 2.1; a *= 0.5; }
     return v;
 }
 
@@ -285,7 +285,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // Same chromophore, just denser. Small radius → freckle, large → mole.
     // Cluster toward center (backs have more spots mid-torso than edges).
     // Deepen on fair skin over time; barely visible on deep melanin.
-    #define SPOT_COUNT 90
+    #define SPOT_COUNT 40
     float spotAge  = clamp(iTime / 60.0, 0.0, 1.0);
     float spotFair = (1.0 - melanin) * (1.0 - melanin);  // quadratic: strong on fair only
     float spotMelanin = 0.0;
@@ -331,64 +331,43 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // Desaturated cool shadow — visible but not vivid
     skinBase += vMask * vec3(-0.018, -0.013, 0.034);
 
-    // SSS — sum of 3 gaussians, each wider and redder
-    // Narrow: surface detail. Mid: dermis blush. Wide: deep red scatter.
-    // RGB weights per layer: red travels furthest, blue barely at all.
-    // Samples use bgColor where ink is detected to prevent text bleeding into skin.
+    // SSS — 4-tap cross pattern per layer (12 total, down from 75)
+    // Cardinal directions only, ink-excluded.
     vec3 sss = vec3(0.0);
-    // Layer 1: narrow (2px), full spectrum
-    vec3 n1 = vec3(0.0); float w1 = 0.0;
-    for (int i = -2; i <= 2; i++) { for (int j = -2; j <= 2; j++) {
-        float d2 = float(i*i+j*j); float w = exp(-d2 / 2.0);
-        vec2 sUV = clamp(uvWarp+vec2(i,j)*px*2.0,0.001,0.999);
-        vec3 s = texture(iChannel0, sUV).rgb;
-        n1 += mix(s, bgColor, inkDetect(s, bgColor)) * w;
-        w1 += w; } }
-    sss += (n1/w1) * vec3(1.20, 0.80, 0.70) * 0.40;
-    // Layer 2: mid (6px), red-shifted
-    vec3 n2 = vec3(0.0); float w2 = 0.0;
-    for (int i = -2; i <= 2; i++) { for (int j = -2; j <= 2; j++) {
-        float d2 = float(i*i+j*j); float w = exp(-d2 / 4.0);
-        vec2 sUV = clamp(uvWarp+vec2(i,j)*px*6.0,0.001,0.999);
-        vec3 s = texture(iChannel0, sUV).rgb;
-        n2 += mix(s, bgColor, inkDetect(s, bgColor)) * w;
-        w2 += w; } }
-    sss += (n2/w2) * vec3(1.50, 0.60, 0.40) * 0.35;
-    // Layer 3: wide (14px), deep red only
-    vec3 n3 = vec3(0.0); float w3 = 0.0;
-    for (int i = -2; i <= 2; i++) { for (int j = -2; j <= 2; j++) {
-        float d2 = float(i*i+j*j); float w = exp(-d2 / 6.0);
-        vec2 sUV = clamp(uvWarp+vec2(i,j)*px*14.0,0.001,0.999);
-        vec3 s = texture(iChannel0, sUV).rgb;
-        n3 += mix(s, bgColor, inkDetect(s, bgColor)) * w;
-        w3 += w; } }
-    sss += (n3/w3) * vec3(1.80, 0.30, 0.20) * 0.25;
-
+    for (int layer = 0; layer < 3; layer++) {
+        float radius = (layer == 0) ? 2.0 : (layer == 1) ? 6.0 : 14.0;
+        vec3 tint = (layer == 0) ? vec3(1.20, 0.80, 0.70) * 0.40
+                  : (layer == 1) ? vec3(1.50, 0.60, 0.40) * 0.35
+                  :                vec3(1.80, 0.30, 0.20) * 0.25;
+        vec3 acc = vec3(0.0);
+        for (int t = 0; t < 4; t++) {
+            vec2 d = (t==0) ? vec2(1,0) : (t==1) ? vec2(-1,0) : (t==2) ? vec2(0,1) : vec2(0,-1);
+            vec2 sUV = clamp(uvWarp + d * px * radius, 0.001, 0.999);
+            vec3 s = texture(iChannel0, sUV).rgb;
+            acc += mix(s, bgColor, inkDetect(s, bgColor));
+        }
+        sss += (acc * 0.25) * tint;
+    }
     skinBase += sss * sssStrength * 0.18 * (1.0 - inkMask);
 
     // ── Normal map — direct central differences ───────────────────────────
-    float cycleCount = iTime / 30.0;  // breath cycles elapsed
     float eps = 0.014;
-    float hC = skinHeight(uvWarp)                  + valleyFold(uvWarp,                  aspect, breath, cycleCount);
-    float hR = skinHeight(uvWarp + vec2(eps, 0.0)) + valleyFold(uvWarp + vec2(eps, 0.0), aspect, breath, cycleCount);
-    float hU = skinHeight(uvWarp + vec2(0.0, eps)) + valleyFold(uvWarp + vec2(0.0, eps), aspect, breath, cycleCount);
+    float hC = skinHeight(uvWarp);
+    float hR = skinHeight(uvWarp + vec2(eps, 0.0));
+    float hU = skinHeight(uvWarp + vec2(0.0, eps));
     float normalScale = mix(0.12, 0.22, melanin);
     vec3 normal = normalize(vec3(
         (hC - hR) * normalScale * aspect,
         (hU - hC) * normalScale,
         1.0));
 
-    // ── Ambient occlusion — horizon sampling from heightfield ─────────────
-    // Sample 8 directions, check if neighbors are higher (occluding)
-    float ao = 0.0;
-    float aoRadius = 0.005;
-    for (int i = 0; i < 8; i++) {
-        float a = float(i) * 0.7854;
-        vec2 dir = vec2(cos(a), sin(a)) * aoRadius;
-        float hN = skinHeight(uvWarp + dir);
-        ao += clamp((hN - hC) * 1.5, 0.0, 1.0);
-    }
-    ao = 1.0 - ao / 8.0 * 0.12;
+    // ── Ambient occlusion — 4 cardinal directions ─────────────────────────
+    float aoR = 0.005;
+    float ao = clamp((skinHeight(uvWarp+vec2(aoR,0.0)) - hC)
+                   + (skinHeight(uvWarp-vec2(aoR,0.0)) - hC)
+                   + (skinHeight(uvWarp+vec2(0.0,aoR)) - hC)
+                   + (skinHeight(uvWarp-vec2(0.0,aoR)) - hC), 0.0, 1.0);
+    ao = 1.0 - ao * 0.12;
 
     // ── Lighting — window light from top-left ──────────────────────────────
     vec2  sunUV = vec2(-0.3, -0.3);  // off-screen top-left (window)

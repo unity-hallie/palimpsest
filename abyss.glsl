@@ -51,9 +51,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     color += BIO_FLASH * core * 1.6;
 
     // -- Text ---------------------------------------------------------
-    // Additive - no masking, just let the bloom carry it
-    vec3 textTinted = mix(term, term * vec3(0.72, 1.0, 0.90), 0.22);
-    color += textTinted;
+    // max() blend -- text always shows at its full terminal color
+    // dark colors aren't swallowed by the glow, bright colors add on top
+    vec3 textTinted = mix(term, term * vec3(0.72, 1.0, 0.90), 0.18);
+    color = 1.0 - (1.0 - color) * (1.0 - textTinted);
 
     fragColor = vec4(clamp(color, 0.0, 1.0), termRaw.a);
 }

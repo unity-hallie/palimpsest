@@ -50,9 +50,10 @@ kernel void computeMain(
     float localEmission  = prev.g;
     float advectedEmission = state_read.sample(smp, uv - vel).g;
 
-    // Refractory gate -- computed from LOCAL state, not advected
-    // Spent cells don't accept incoming light from neighbors (advection bypass fix)
-    float readiness = 1.0 - smoothstep(0.15, 0.45, localEmission);
+    // Refractory gate -- threshold aligned with the slow-decay floor (~0.48)
+    // so the cell snaps from blocked to ready with no partial zone to oscillate in
+    // Hard threshold -- no partial zone, no oscillation
+    float readiness = localEmission < 0.44 ? 1.0 : 0.0;
     float prevEmission = mix(localEmission, advectedEmission, readiness);
 
     // Change detection -- lerped luma dampens cursor transients

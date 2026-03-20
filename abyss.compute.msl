@@ -1,13 +1,13 @@
-// bio.compute.msl — bioluminescence disturbance and emission field
+// abyss.compute.msl — bioluminescence disturbance and emission field
 //
 // Two signals:
-//   Disturbance — spikes when text changes, spreads slightly, decays fast (~0.4s)
-//   Emission    — rises from disturbance, decays slowly (~2s), stays local
+//   Disturbance — spikes when text changes, decays fast (~0.15s halflife)
+//   Emission    — rises from disturbance, advects with a slow drift field
 //
 // State (rgba16f):
 //   R = disturbance
 //   G = emission
-//   B = (unused)
+//   B = time accumulator (self-clocking — no iTime in compute)
 //   A = previous terminal luma (for change detection)
 
 #include <metal_stdlib>
@@ -35,30 +35,38 @@ kernel void computeMain(
 
     // Previous state
     float4 prev = state_read.sample(smp, uv);
-    float prevLuma     = prev.a;
-    float prevDisturb  = prev.r;
-    float prevEmission = prev.g;
+    float prevLuma    = prev.a;
+    float prevDisturb = prev.r;
+    float t           = fmod(prev.b + 0.004, 6.2832);  // self-clocking ~25s cycle
 
-    // Change detection — lerp stored luma toward current so cursor transients
-    // don't fully re-trigger next frame (single-frame spike echoes at 30% not 100%)
+    // ── Drift velocity field ─────────────────────────────────────────
+    // Smooth sinusoidal field — no iTime needed, B channel carries the clock
+    float2 vel = float2(
+        sin(uv.y * 3.7 + t * 0.9) * cos(uv.x * 2.1 + t * 0.4),
+        cos(uv.x * 3.1 + t * 0.7) * sin(uv.y * 2.5 + t * 0.5)
+    ) * 0.00015;  // ~9px/s at 1080p — gentle ocean current
+
+    // ── Advect emission ──────────────────────────────────────────────
+    // Read from where this pixel's water came from, not where it is now
+    float prevEmission = state_read.sample(smp, uv - vel).g;
+
+    // Change detection — lerped luma dampens cursor transients
     float change = abs(luma - prevLuma);
     float storedLuma = mix(prevLuma, luma, 0.30);
 
-    // Disturbance: pure local — no neighbor spread (bloom handles spatial diffusion)
+    // Disturbance: pure local, fast decay
     float disturbance = prevDisturb * 0.88;
-    // sqrt flattens the response — large scroll changes don't spike much harder than typing
     disturbance = max(disturbance, sqrt(change) * 0.9);
     disturbance = min(disturbance, 1.0);
 
-    // Emission: gradual rise, sharp falloff
+    // Emission: gradual rise into advected field, sharp falloff
     float target = disturbance * 0.85;
-    float emission = prevEmission * 0.960;                  // sharp falloff ~0.3s halflife
-    emission = mix(emission, max(emission, target), 0.12);  // rises slowly toward target
-    // Static text: faint ambient floor — organisms barely alive under still water
+    float emission = prevEmission * 0.960;
+    emission = mix(emission, max(emission, target), 0.12);
     if (hasText) {
-        emission = max(emission, 0.012);
+        emission = max(emission, 0.012);  // faint ambient floor under still text
     }
     emission = min(emission, 1.0);
 
-    state_write.write(float4(disturbance, emission, 0.0, storedLuma), gid);
+    state_write.write(float4(disturbance, emission, t, storedLuma), gid);
 }

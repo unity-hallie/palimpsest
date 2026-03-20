@@ -1,0 +1,64 @@
+// bio.compute.msl — bioluminescence disturbance and emission field
+//
+// Two signals:
+//   Disturbance — spikes when text changes, spreads slightly, decays fast (~0.4s)
+//   Emission    — rises from disturbance, decays slowly (~2s), stays local
+//
+// State (rgba16f):
+//   R = disturbance
+//   G = emission
+//   B = (unused)
+//   A = previous terminal luma (for change detection)
+
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void computeMain(
+    texture2d<float, access::sample> terminal    [[ texture(0) ]],
+    texture2d<float, access::sample> feedback    [[ texture(2) ]],
+    texture2d<float, access::sample> state_read  [[ texture(3) ]],
+    texture2d<float, access::write>  state_write [[ texture(8) ]],
+    uint2                            gid         [[ thread_position_in_grid ]]
+) {
+    uint W = state_write.get_width();
+    uint H = state_write.get_height();
+    if (gid.x >= W || gid.y >= H) return;
+
+    constexpr sampler smp(filter::linear, address::clamp_to_edge);
+    float2 uv = (float2(gid) + 0.5) / float2(W, H);
+    float2 px = 1.0 / float2(W, H);
+
+    // Current terminal
+    float3 term = terminal.sample(smp, uv).rgb;
+    float luma = dot(term, float3(0.299, 0.587, 0.114));
+    bool hasText = luma > 0.04;
+
+    // Previous state
+    float4 prev = state_read.sample(smp, uv);
+    float prevLuma     = prev.a;
+    float prevDisturb  = prev.r;
+    float prevEmission = prev.g;
+
+    // Change detection — lerp stored luma toward current so cursor transients
+    // don't fully re-trigger next frame (single-frame spike echoes at 30% not 100%)
+    float change = abs(luma - prevLuma);
+    float storedLuma = mix(prevLuma, luma, 0.30);
+
+    // Disturbance: pure local — no neighbor spread (bloom handles spatial diffusion)
+    float disturbance = prevDisturb * 0.88;
+    // sqrt flattens the response — large scroll changes don't spike much harder than typing
+    disturbance = max(disturbance, sqrt(change) * 0.9);
+    disturbance = min(disturbance, 1.0);
+
+    // Emission: gradual rise, sharp falloff
+    float target = disturbance * 0.85;
+    float emission = prevEmission * 0.960;                  // sharp falloff ~0.3s halflife
+    emission = mix(emission, max(emission, target), 0.12);  // rises slowly toward target
+    // Static text: faint ambient floor — organisms barely alive under still water
+    if (hasText) {
+        emission = max(emission, 0.012);
+    }
+    emission = min(emission, 1.0);
+
+    state_write.write(float4(disturbance, emission, 0.0, storedLuma), gid);
+}

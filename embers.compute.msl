@@ -1,12 +1,12 @@
-// embers.compute.msl — irradiance field + pixel age tracking
+// embers.compute.msl - irradiance field + pixel age tracking
 //
 // Two jobs:
-// 1. Golden-angle irradiance gather (weighted by age — old text glows less)
+// 1. Golden-angle irradiance gather (weighted by age - old text glows less)
 // 2. Track how long each pixel position has had text on it.
 //    New text = hot. Old text = cooling. Scrolled text = fresh again.
 //
 // State texture (rgba16f):
-//   R = irradiance (scalar — warm-tinted in fragment)
+//   R = irradiance (scalar - warm-tinted in fragment)
 //   G = irradiance color warmth (how much of the source was warm vs cool)
 //   B = irradiance color tint  (hue signal for fragment)
 //   A = pixel age (0.0 = just appeared, increases each frame, max ~1.0)
@@ -31,26 +31,26 @@ kernel void computeMain(
 
     float3 bgRef = float3(0.055, 0.035, 0.027);
 
-    // ── Current terminal pixel ──────────────────────────────────────
+    // -- Current terminal pixel --------------------------------------
     float3 term = terminal.sample(smp, uv).rgb;
     float3 keyed = max(term - bgRef, float3(0.0));
     float lum = dot(keyed, float3(0.299, 0.587, 0.114));
     bool hasText = lum > 0.02;
 
-    // ── Age tracking ────────────────────────────────────────────────
+    // -- Age tracking ------------------------------------------------
     float prevAge = state_read.sample(smp, uv).a;
 
     float age;
     if (hasText) {
-        // Text present — age increases (0 = new, 1 = old)
+        // Text present - age increases (0 = new, 1 = old)
         // ~0.000056 per frame at 60fps = ~5 minutes to reach 1.0
         age = min(prevAge + 0.000056, 1.0);
     } else {
-        // No text — reset immediately so it's hot when text returns
+        // No text - reset immediately so it's hot when text returns
         age = 0.0;
     }
 
-    // ── Iterative blur — dissolves letterforms over frames ──────────
+    // -- Iterative blur - dissolves letterforms over frames ----------
     // Blur the PREVIOUS frame's light field (not raw terminal).
     // Blurring the blur each frame = wide gaussian over time.
     // Fresh terminal injected at low weight to stay current.
@@ -64,7 +64,7 @@ kernel void computeMain(
     }
     blurred /= 24.0;
 
-    // Fresh terminal — tiny local blur to smooth injection (no ping-pong)
+    // Fresh terminal - tiny local blur to smooth injection (no ping-pong)
     float3 fresh = float3(0.0);
     for (int i = 0; i < 8; i++) {
         float a = float(i) * 0.7854;
@@ -75,7 +75,7 @@ kernel void computeMain(
     float ageFade = 1.0 - age * 0.6;
     fresh *= ageFade;
 
-    // 80% blurred history + 20% fresh — smooth, responsive, no flicker
+    // 80% blurred history + 20% fresh - smooth, responsive, no flicker
     float3 irradiance = mix(blurred, fresh, 0.20);
 
     state_write.write(float4(irradiance, age), gid);

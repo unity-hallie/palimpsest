@@ -1,13 +1,13 @@
-// abyss.compute.msl — bioluminescence disturbance and emission field
+// abyss.compute.msl -- bioluminescence disturbance and emission field
 //
 // Two signals:
-//   Disturbance — spikes when text changes, decays fast (~0.15s halflife)
-//   Emission    — rises from disturbance, advects with a slow drift field
+//   Disturbance -- spikes when text changes, decays fast (~0.15s halflife)
+//   Emission    -- rises from disturbance, advects with a slow drift field
 //
 // State (rgba16f):
 //   R = disturbance
 //   G = emission
-//   B = time accumulator (self-clocking — no iTime in compute)
+//   B = time accumulator (self-clocking -- no iTime in compute)
 //   A = previous terminal luma (for change detection)
 
 #include <metal_stdlib>
@@ -39,18 +39,23 @@ kernel void computeMain(
     float prevDisturb = prev.r;
     float t           = fmod(prev.b + 0.004, 6.2832);  // self-clocking ~25s cycle
 
-    // ── Drift velocity field ─────────────────────────────────────────
-    // Smooth sinusoidal field — no iTime needed, B channel carries the clock
+    // -- Drift velocity field -----------------------------------------
+    // Smooth sinusoidal field -- no iTime needed, B channel carries the clock
     float2 vel = float2(
         sin(uv.y * 3.7 + t * 0.9) * cos(uv.x * 2.1 + t * 0.4),
         cos(uv.x * 3.1 + t * 0.7) * sin(uv.y * 2.5 + t * 0.5)
-    ) * 0.00015;  // ~9px/s at 1080p — gentle ocean current
+    ) * 0.00015;  // ~9px/s at 1080p -- gentle ocean current
 
-    // ── Advect emission ──────────────────────────────────────────────
-    // Read from where this pixel's water came from, not where it is now
-    float prevEmission = state_read.sample(smp, uv - vel).g;
+    // -- Advect emission ----------------------------------------------
+    float localEmission  = prev.g;
+    float advectedEmission = state_read.sample(smp, uv - vel).g;
 
-    // Change detection — lerped luma dampens cursor transients
+    // Refractory gate -- computed from LOCAL state, not advected
+    // Spent cells don't accept incoming light from neighbors (advection bypass fix)
+    float readiness = 1.0 - smoothstep(0.15, 0.45, localEmission);
+    float prevEmission = mix(localEmission, advectedEmission, readiness);
+
+    // Change detection -- lerped luma dampens cursor transients
     float change = abs(luma - prevLuma);
     float storedLuma = mix(prevLuma, luma, 0.30);
 
@@ -59,14 +64,12 @@ kernel void computeMain(
     disturbance = max(disturbance, sqrt(change) * 0.9);
     disturbance = min(disturbance, 1.0);
 
-    // Refractory gate — cells that just fired can't re-trigger.
-    // Nearly binary: above ~0.3 emission the cell is essentially spent.
-    // Recovers as luciferin resynthesizes (emission decays).
-    float readiness = 1.0 - smoothstep(0.15, 0.45, prevEmission);
-
-    // Emission: gradual rise gated by readiness, slower decay so spent state is visible
+    // Two-rate decay: flash fades fast (no flicker), then holds a slow refractory floor
+    // Above 0.5: rapid visual decay -- flash gone in ~0.2s, clears the oscillation zone fast
+    // Below 0.5: very slow decay -- refractory floor persists ~5 min
+    float decayRate = prevEmission > 0.5 ? 0.92 : 0.99992;
     float target = disturbance * 0.90 * readiness;
-    float emission = prevEmission * 0.99990; // ~5min refractory — decays from 1.0 to threshold over ~18000 frames
+    float emission = prevEmission * decayRate;
     emission = mix(emission, max(emission, target), 0.10);
     if (hasText) {
         emission = max(emission, 0.012);  // faint ambient floor under still text

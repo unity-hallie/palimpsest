@@ -1,24 +1,24 @@
-// bio.glsl — bioluminescence in dark water
+// bio.glsl - bioluminescence in dark water
 //
 // Pitch black deep ocean. Text disturbs the water.
-// Disturbed pixels trigger dinoflagellate emission — blue-green light
+// Disturbed pixels trigger dinoflagellate emission - blue-green light
 // that blooms and slowly fades back to dark.
 //
 // iChannel0 = terminal content
 // iChannel2 = compute state (emission field from bio.compute.msl)
 
-// ── Tuning ──────────────────────────────────────────────────────────
+// -- Tuning ----------------------------------------------------------
 #define BIO_COLOR    vec3(0.02, 0.78, 0.58)    // dinoflagellate cyan-green
 #define BIO_FLASH    vec3(0.18, 1.00, 0.82)    // bright flash at epicenter
-#define OCEAN_BG     vec3(0.004, 0.012, 0.020) // deep water — matches conf background
+#define OCEAN_BG     vec3(0.004, 0.012, 0.020) // deep water - matches conf background
 #define BLOOM_TAPS   24
-#define BLOOM_SCALE  0.55                       // tight — dense enough to be continuous
-// ════════════════════════════════════════════════════════════════════
+#define BLOOM_SCALE  0.55                       // tight - dense enough to be continuous
+// --------------------------------------------------------------------
 
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 uv = fragCoord / iResolution.xy;
 
-    // ── Terminal ─────────────────────────────────────────────────────
+    // -- Terminal -----------------------------------------------------
     vec4 termRaw = texture(iChannel0, uv);
     vec3 term = termRaw.rgb;
     float textLuma = dot(term, vec3(0.299, 0.587, 0.114));
@@ -26,10 +26,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float textMask = smoothstep(0.03, 0.12, distFromBg);
     textMask = max(textMask, smoothstep(0.06, 0.18, textLuma));
 
-    // ── Emission field ───────────────────────────────────────────────
+    // -- Emission field -----------------------------------------------
     float emission = texture(iChannel2, uv).g;
 
-    // Soft bloom — golden-angle spiral at increasing radii
+    // Soft bloom - golden-angle spiral at increasing radii
     float bloom = 0.0;
     float goldenAngle = 2.39996323;
     for (int i = 0; i < BLOOM_TAPS; i++) {
@@ -40,17 +40,18 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     }
     bloom /= float(BLOOM_TAPS);
 
-    // Core: sharp local emission. Halo: diffused bloom.
-    float core = pow(emission, 1.0);   // linear — gradual build
-    float halo = pow(bloom, 2.2);      // sharp falloff — bright center, dark edges
+    // Perceptual curve: flash looks bright, then falls to near-dark fast
+    // pow > 1 crushes midtones - only the peak of the flash reads as bright
+    float core = pow(emission, 3.5);   // steep - vivid flash, quickly near-black
+    float halo = pow(bloom, 2.8);
 
-    // ── Color ────────────────────────────────────────────────────────
+    // -- Color --------------------------------------------------------
     vec3 color = OCEAN_BG;
-    color += BIO_COLOR * halo * 1.8;
-    color += BIO_FLASH * core * 1.6;  // brighter initial flash
+    color += BIO_COLOR * halo * 2.4;
+    color += BIO_FLASH * core * 2.2;  // bright flash, crushed fast by the power curve
 
-    // ── Text ─────────────────────────────────────────────────────────
-    // Additive — no masking, just let the bloom carry it
+    // -- Text ---------------------------------------------------------
+    // Additive - no masking, just let the bloom carry it
     vec3 textTinted = mix(term, term * vec3(0.72, 1.0, 0.90), 0.22);
     color += textTinted;
 

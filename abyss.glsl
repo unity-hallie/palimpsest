@@ -46,8 +46,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
     // ── Color ────────────────────────────────────────────────────────
     vec3 color = OCEAN_BG;
-    color += BIO_COLOR * halo * 1.4;
-    color += BIO_FLASH * core * 0.9;
+    color += BIO_COLOR * halo * 1.8;
+    color += BIO_FLASH * core * 1.6;  // brighter initial flash
 
     // ── Text ─────────────────────────────────────────────────────────
     // Additive — no masking, just let the bloom carry it

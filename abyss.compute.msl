@@ -59,10 +59,15 @@ kernel void computeMain(
     disturbance = max(disturbance, sqrt(change) * 0.9);
     disturbance = min(disturbance, 1.0);
 
-    // Emission: gradual rise into advected field, sharp falloff
-    float target = disturbance * 0.85;
-    float emission = prevEmission * 0.960;
-    emission = mix(emission, max(emission, target), 0.12);
+    // Refractory gate — cells that just fired can't re-trigger.
+    // Nearly binary: above ~0.3 emission the cell is essentially spent.
+    // Recovers as luciferin resynthesizes (emission decays).
+    float readiness = 1.0 - smoothstep(0.15, 0.45, prevEmission);
+
+    // Emission: gradual rise gated by readiness, slower decay so spent state is visible
+    float target = disturbance * 0.90 * readiness;
+    float emission = prevEmission * 0.99990; // ~5min refractory — decays from 1.0 to threshold over ~18000 frames
+    emission = mix(emission, max(emission, target), 0.10);
     if (hasText) {
         emission = max(emission, 0.012);  // faint ambient floor under still text
     }

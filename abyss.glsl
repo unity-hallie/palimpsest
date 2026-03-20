@@ -42,13 +42,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
     // Perceptual curve: flash looks bright, then falls to near-dark fast
     // pow > 1 crushes midtones - only the peak of the flash reads as bright
-    float core = pow(emission, 3.5);   // steep - vivid flash, quickly near-black
-    float halo = pow(bloom, 2.8);
+    float core = pow(emission, 1.8);
+    float halo = pow(bloom, 1.4);
 
     // -- Color --------------------------------------------------------
     vec3 color = OCEAN_BG;
-    color += BIO_COLOR * halo * 2.4;
-    color += BIO_FLASH * core * 2.2;  // bright flash, crushed fast by the power curve
+    color += BIO_COLOR * halo * 1.8;
+    color += BIO_FLASH * core * 1.6;
 
     // -- Text ---------------------------------------------------------
     // Additive - no masking, just let the bloom carry it

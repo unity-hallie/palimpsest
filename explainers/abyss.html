@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>abyss.glsl — bioluminescence in dark water</title>
+<style>
+:root {
+  --ocean: #010305;
+  --deep: #020810;
+  --bio: #00e8a0;
+  --bio-dim: #00a870;
+  --bio-dark: #003830;
+  --foam: #b0e8d8;
+  --foam-dim: #608878;
+  --paper: #f4faf8;
+  --ink: #0a1e18;
+  --ink-mid: #2a4a40;
+  --ink-light: #5a8a78;
+  --grid: #d8eee8;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: var(--paper); color: var(--ink); line-height: 1.75; overflow-x: hidden; }
+
+/* ── Hero ── */
+.hero { padding: 80px 24px 56px; text-align: center; background: var(--ocean); }
+.eyebrow { font-size: .72em; font-weight: 700; letter-spacing: .2em; text-transform: uppercase; color: var(--bio-dim); margin-bottom: 24px; font-family: ui-monospace, monospace; }
+.hero h1 { font-size: clamp(2.2em, 6vw, 4.4em); font-weight: 900; line-height: 1.04; letter-spacing: -.025em; margin-bottom: 20px; color: white; }
+.hero h1 em { font-style: normal; color: var(--bio); }
+.hero .subtitle { font-size: 1.05em; color: rgba(255,255,255,.45); max-width: 480px; margin: 0 auto; line-height: 1.68; }
+.byline { font-size: .78em; color: rgba(255,255,255,.25); margin-top: 16px; letter-spacing: .04em; }
+
+/* ── Demo ── */
+.demo-hero { background: var(--deep); padding: 48px 24px 56px; }
+.demo-inner { max-width: 960px; margin: 0 auto; display: grid; grid-template-columns: 1fr 280px; gap: 32px; align-items: start; }
+@media (max-width: 720px) { .demo-inner { grid-template-columns: 1fr; } }
+.canvas-wrap { position: relative; border-radius: 10px; overflow: hidden; box-shadow: 0 0 0 1px rgba(0,232,160,.08), 0 24px 64px rgba(0,0,0,.7); cursor: crosshair; }
+#abyssCanvas { display: block; width: 100%; height: auto; }
+.canvas-badge { position: absolute; top: 10px; right: 10px; background: rgba(0,0,0,.5); color: rgba(0,232,160,.4); font-size: .68em; font-family: ui-monospace, monospace; padding: 3px 8px; border-radius: 4px; letter-spacing: .06em; pointer-events: none; }
+.demo-panel { color: white; }
+.demo-panel-title { font-size: .72em; font-weight: 700; letter-spacing: .18em; text-transform: uppercase; color: rgba(0,232,160,.4); margin-bottom: 20px; font-family: ui-monospace, monospace; }
+.demo-hint { font-size: .84em; color: rgba(255,255,255,.3); line-height: 1.6; font-style: italic; margin-bottom: 24px; }
+.stat-row { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; }
+.stat-label { font-size: .75em; color: rgba(255,255,255,.3); font-family: ui-monospace, monospace; min-width: 90px; }
+.stat-bar-wrap { flex: 1; height: 4px; background: rgba(255,255,255,.08); border-radius: 2px; overflow: hidden; }
+.stat-bar { height: 100%; border-radius: 2px; transition: width .1s ease; }
+.stat-bar.disturb { background: rgba(0,232,160,.6); }
+.stat-bar.emit { background: var(--bio); }
+.stat-val { font-size: .72em; font-family: ui-monospace, monospace; color: rgba(255,255,255,.25); min-width: 34px; text-align: right; }
+.demo-caption { max-width: 960px; margin: 20px auto 0; font-size: .82em; color: rgba(255,255,255,.25); text-align: center; font-style: italic; line-height: 1.6; padding: 0 24px; }
+
+/* ── Section label ── */
+.section-label { font-size: .72em; font-weight: 700; letter-spacing: .18em; text-transform: uppercase; color: var(--bio-dim); margin-bottom: 14px; font-family: ui-monospace, monospace; }
+
+/* ── Prose ── */
+.prose { max-width: 620px; margin: 0 auto; padding: 64px 24px; }
+.prose h2 { font-size: clamp(1.5em, 3vw, 2em); font-weight: 900; letter-spacing: -.02em; line-height: 1.15; margin-bottom: 22px; }
+.prose p { font-size: 1.02em; margin-bottom: 18px; line-height: 1.78; color: var(--ink-mid); }
+.prose p strong { color: var(--ink); }
+.prose code { font-family: ui-monospace, monospace; font-size: .88em; background: var(--grid); padding: 1px 5px; border-radius: 3px; }
+.prose .pull { font-size: 1.12em; font-weight: 700; color: var(--bio-dark); line-height: 1.44; border-left: 3px solid var(--bio-dim); padding: 2px 0 2px 20px; margin: 32px 0; color: var(--ink-mid); }
+hr { border: none; border-top: 1px solid var(--grid); max-width: 620px; margin: 0 auto; }
+
+/* ── Biology card ── */
+.bio-card-section { max-width: 700px; margin: 0 auto; padding: 56px 24px; }
+.bio-card-section h2 { font-size: clamp(1.4em, 3vw, 1.9em); font-weight: 900; letter-spacing: -.02em; margin-bottom: 12px; }
+.bio-intro { font-size: 1.02em; color: var(--ink-mid); margin-bottom: 28px; line-height: 1.72; }
+.card { background: white; border-radius: 12px; padding: 36px 40px; box-shadow: 0 1px 2px rgba(10,30,24,.04), 0 4px 12px rgba(10,30,24,.06), 0 20px 48px rgba(10,30,24,.07); margin-bottom: 24px; }
+@media (max-width: 500px) { .card { padding: 24px 20px; } }
+.cell-diagram { display: flex; gap: 24px; align-items: flex-start; margin-bottom: 24px; }
+@media (max-width: 560px) { .cell-diagram { flex-direction: column; } }
+.cell-svg-wrap { flex-shrink: 0; }
+.cell-desc { font-size: .94em; color: var(--ink-mid); line-height: 1.72; }
+.cell-desc strong { color: var(--ink); }
+
+/* ── Signal timeline ── */
+.signal-timeline { margin: 0 0 8px; }
+.signal-row { display: flex; align-items: center; gap: 14px; margin-bottom: 10px; }
+.signal-name { font-size: .75em; font-family: ui-monospace, monospace; color: var(--ink-light); min-width: 80px; }
+.signal-track { flex: 1; height: 28px; border-radius: 4px; overflow: hidden; position: relative; background: var(--grid); }
+.signal-fill { position: absolute; top: 0; left: 0; height: 100%; border-radius: 4px; }
+.signal-caption { font-size: .78em; color: var(--ink-light); margin-top: 4px; margin-bottom: 16px; font-style: italic; }
+
+/* ── Pipeline ── */
+.pipeline { display: flex; gap: 0; border-radius: 8px; overflow: hidden; margin-bottom: 16px; }
+.pipe-step { flex: 1; padding: 20px 16px; text-align: center; position: relative; }
+.pipe-step + .pipe-step::before { content: '→'; position: absolute; left: -8px; top: 50%; transform: translateY(-50%); color: rgba(255,255,255,.3); font-size: 1.1em; z-index: 1; }
+.pipe-label { font-size: .7em; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; margin-bottom: 6px; }
+.pipe-val { font-family: ui-monospace, monospace; font-size: .82em; line-height: 1.5; opacity: .8; }
+
+/* ── Refractory ── */
+.refractory-note { background: var(--ocean); border-radius: 8px; padding: 20px 24px; color: rgba(255,255,255,.5); font-size: .9em; line-height: 1.65; margin-top: 8px; }
+.refractory-note strong { color: var(--bio-dim); }
+
+/* ── Closing ── */
+.closing { background: var(--ocean); color: white; padding: 80px 24px 64px; text-align: center; }
+.closing h2 { font-size: clamp(1.7em, 4vw, 2.8em); font-weight: 900; line-height: 1.1; letter-spacing: -.025em; margin-bottom: 24px; }
+.closing h2 em { font-style: normal; color: var(--bio); }
+.closing p { font-size: 1.02em; color: rgba(255,255,255,.4); max-width: 480px; margin: 0 auto 16px; line-height: 1.72; }
+.closing a { color: rgba(255,255,255,.55); }
+.closing code { font-family: ui-monospace, monospace; font-size: .88em; opacity: .6; }
+.config-cards { max-width: 680px; margin: 48px auto 0; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; text-align: left; }
+@media (max-width: 560px) { .config-cards { grid-template-columns: 1fr; } }
+.config-card { background: rgba(255,255,255,.05); border: 1px solid rgba(0,232,160,.1); border-radius: 12px; padding: 24px 24px 20px; }
+.config-card-label { font-size: .7em; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; color: var(--bio-dim); font-family: ui-monospace, monospace; margin-bottom: 10px; }
+.config-swatch { width: 100%; height: 32px; border-radius: 6px; margin-bottom: 16px; background: #010305; }
+.config-card p { font-size: .86em; color: rgba(255,255,255,.38); line-height: 1.55; }
+.config-card code { font-family: ui-monospace, monospace; font-size: .84em; color: rgba(0,232,160,.5); }
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <div class="eyebrow">palimpsest / abyss.glsl</div>
+  <h1>Your terminal is<br><em>dark water.</em></h1>
+  <p class="subtitle">A GLSL fragment shader + Metal compute pass that treats text as physical disturbance in bioluminescent ocean water. Touch the surface. Watch what wakes.</p>
+  <p class="byline">Hallie Larsson &amp; Claude · 2026</p>
+</div>
+
+<!-- ── Live Demo ── -->
+<div class="demo-hero">
+  <div class="demo-inner">
+    <div class="canvas-wrap">
+      <canvas id="abyssCanvas" width="600" height="375"></canvas>
+      <div class="canvas-badge">abyss.glsl · WebGL2</div>
+    </div>
+    <div class="demo-panel">
+      <div class="demo-panel-title">signal state</div>
+      <p class="demo-hint">Click or drag in the canvas to disturb the water. Watch disturbance spike and decay, then emission rise and drift.</p>
+      <div class="stat-row">
+        <span class="stat-label">disturbance</span>
+        <div class="stat-bar-wrap"><div class="stat-bar disturb" id="statDisturb" style="width:0%"></div></div>
+        <span class="stat-val" id="statDisturbVal">0.00</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">emission</span>
+        <div class="stat-bar-wrap"><div class="stat-bar emit" id="statEmit" style="width:0%"></div></div>
+        <span class="stat-val" id="statEmitVal">0.00</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">drift phase</span>
+        <div class="stat-bar-wrap"><div class="stat-bar" id="statDrift" style="width:0%; background: rgba(0,180,120,.4);"></div></div>
+        <span class="stat-val" id="statDriftVal">0.00</span>
+      </div>
+    </div>
+  </div>
+  <p class="demo-caption">Approximation of the compute pass. In the real shader, emission advects along a slowly varying velocity field — light drifts with the current.</p>
+</div>
+
+<!-- ── Biology ── -->
+<hr>
+<div class="bio-card-section">
+  <div class="section-label">the organism</div>
+  <h2>A single cell. One photon. One chance.</h2>
+  <p class="bio-intro">Dinoflagellates are single-celled marine organisms — half plant, half animal — that have been evolving for 200 million years. Each one carries its own cold-light chemistry, triggered not by will but by touch.</p>
+
+  <div class="card">
+    <div class="cell-diagram">
+      <div class="cell-svg-wrap">
+        <svg width="110" height="130" viewBox="0 0 110 130" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <!-- cell body -->
+          <ellipse cx="55" cy="60" rx="36" ry="44" fill="#010e0a" stroke="#00a870" stroke-width="1.5"/>
+          <!-- transverse groove -->
+          <path d="M21 60 Q55 52 89 60" stroke="#00e8a0" stroke-width="1" fill="none" opacity=".5"/>
+          <!-- longitudinal groove -->
+          <path d="M55 17 Q48 60 55 103" stroke="#00e8a0" stroke-width="1" fill="none" opacity=".3"/>
+          <!-- flagellum 1 -->
+          <path d="M55 103 Q62 118 55 128" stroke="#00a870" stroke-width="1.2" fill="none"/>
+          <!-- flagellum 2 -->
+          <path d="M55 60 Q78 54 88 62 Q96 70 88 76" stroke="#00a870" stroke-width="1.2" fill="none"/>
+          <!-- nucleus -->
+          <ellipse cx="55" cy="58" rx="14" ry="10" fill="#003020" stroke="#00a870" stroke-width="1" opacity=".8"/>
+          <!-- luciferin vesicles -->
+          <circle cx="38" cy="48" r="3.5" fill="#00e8a0" opacity=".6"/>
+          <circle cx="70" cy="44" r="2.5" fill="#00e8a0" opacity=".4"/>
+          <circle cx="42" cy="72" r="2" fill="#00e8a0" opacity=".5"/>
+          <circle cx="66" cy="70" r="3" fill="#00e8a0" opacity=".35"/>
+          <circle cx="55" cy="40" r="2" fill="#00e8a0" opacity=".3"/>
+          <!-- glow -->
+          <ellipse cx="55" cy="60" rx="36" ry="44" fill="url(#cellglow)" opacity=".2"/>
+          <defs>
+            <radialGradient id="cellglow" cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stop-color="#00e8a0"/>
+              <stop offset="100%" stop-color="#00e8a0" stop-opacity="0"/>
+            </radialGradient>
+          </defs>
+        </svg>
+      </div>
+      <div class="cell-desc">
+        <strong>Noctiluca, Pyrocystis, Lingulodinium</strong> — all dinoflagellates, all bioluminescent. Each cell membrane contains <strong>mechanoreceptors</strong>: ion channels that open under physical pressure. A wave. A fin. A hand.
+        <br><br>
+        When the channel opens, a voltage spike propagates through the membrane. Protons flood the <strong>scintillon</strong> — a specialized acidic organelle — dropping the pH and activating <strong>luciferase</strong>. Luciferin oxidizes. A photon leaves the cell. Blue-green, 474nm.
+        <br><br>
+        Then silence. The luciferin is spent. The cell must recharge over hours before it can fire again.
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="section-label" style="margin-bottom: 18px;">disturbance → emission</div>
+    <div class="signal-timeline">
+      <div class="signal-row">
+        <span class="signal-name">pressure</span>
+        <div class="signal-track">
+          <div class="signal-fill" style="width:8%; background: #00e8a0; left: 20%;"></div>
+        </div>
+      </div>
+      <div class="signal-row">
+        <span class="signal-name">ion channel</span>
+        <div class="signal-track">
+          <div class="signal-fill" style="width:8%; background: #00c080; left: 21%;"></div>
+        </div>
+      </div>
+      <div class="signal-row">
+        <span class="signal-name">pH drop</span>
+        <div class="signal-track">
+          <div class="signal-fill" style="width:10%; background: #009060; left: 22%;"></div>
+        </div>
+      </div>
+      <div class="signal-row">
+        <span class="signal-name">photon</span>
+        <div class="signal-track">
+          <div class="signal-fill" style="width:6%; background: #00e8a0; left: 24%;"></div>
+        </div>
+      </div>
+      <div class="signal-row">
+        <span class="signal-name">recharge</span>
+        <div class="signal-track">
+          <div class="signal-fill" style="width:55%; background: #003820; left: 30%;"></div>
+        </div>
+      </div>
+    </div>
+    <p class="signal-caption">Each cell fires once per disturbance event. The recharge period (hours) prevents re-triggering — which is why disturbed water doesn't just stay lit.</p>
+    <div class="refractory-note">
+      <strong>The shader approximation:</strong> disturbance uses <code>max()</code> not <code>+=</code> — so it can't stack across frames. It rises to meet a spike, then decays. The refractory period isn't fully modeled (a cooldown channel would be the next layer of biology), but the spike-then-decay behavior captures the essential character: touch creates light; the light doesn't outlast the touch by much.
+    </div>
+  </div>
+</div>
+
+<hr>
+
+<!-- ── How the shader works ── -->
+<div class="prose">
+  <div class="section-label">the pipeline</div>
+  <h2>Two passes. Two signals.</h2>
+
+  <p>The effect runs as a <strong>compute + fragment</strong> pair. The compute shader runs every frame before the fragment shader sees anything, maintaining a state texture that accumulates history.</p>
+
+  <p class="pull">The terminal texture is read-only. The shader never modifies what Ghostty renders — it only observes changes and responds with light.</p>
+
+  <p><strong>Change detection</strong> — each frame, the compute shader compares the current terminal luma at each pixel to the luma stored from the previous frame. A difference means something changed: a character appeared, the cursor moved, text scrolled. This difference is the "disturbance."</p>
+
+  <p>To prevent cursor flicker from re-triggering every frame at the same position, the stored luma is lerped toward the current value at 30% per frame — so a single-frame transient only echoes at 30% strength the next frame, 9% the frame after, and so on. Fast typing doesn't oscillate.</p>
+
+  <p><strong>Disturbance → emission</strong> — disturbance decays fast (~0.15s halflife). It spikes on change and fades. Emission rises toward disturbance but slowly (12% per frame), then decays at its own rate (~0.3s halflife). This creates the characteristic shape: rapid flash, then a longer tail of fading light.</p>
+
+  <p>Scroll events are compressed with <code>sqrt(change)</code> — a luma change of 0.64 (full-screen scroll) produces only 0.8× disturbance instead of spiking to maximum. This keeps scroll readable rather than blinding.</p>
+
+  <p><strong>Drift</strong> — the B channel of the state texture is a self-incrementing timer (increments 0.004/frame, wraps at 2π, giving a ~25 second cycle). Each frame, the velocity field is derived from this timer using smooth sinusoidal functions. Emission is <em>advected</em> — instead of reading the previous emission at the current UV position, the shader reads from slightly upstream: <code>state_read.sample(smp, uv - vel)</code>. Light moves with the current.</p>
+
+  <p><strong>Bloom</strong> — the fragment shader samples the emission field using a golden-angle spiral (24 taps, tight radius) and adds a soft halo. Text is added additively so dark anti-aliased edges contribute nothing — the bloom carries the letter forms rather than masking cutting against it.</p>
+</div>
+
+<hr>
+
+<!-- ── Real phenomenon ── -->
+<div class="prose">
+  <div class="section-label">the real thing</div>
+  <h2>Milky Sea and wake light.</h2>
+
+  <p>Bioluminescent bays — Mosquito Bay in Puerto Rico, Luminous Lagoon in Jamaica — have such dense dinoflagellate populations that the water glows blue-green continuously. Disturbed water is brighter; still water dims.</p>
+
+  <p>A ship's wake at night is one of the strangest sights in nature. The bow wave spreads out in a V, each compressed water mass triggering cells in sequence. The turbulence at the stern glows longest because it churns the water most. The trail persists for minutes as the emission field drifts and fades.</p>
+
+  <p class="pull">Your hand in the water becomes visible as its own outline, drawn in living light. Not your hand — the negative-space map of where your hand displaced water.</p>
+
+  <p>The <strong>Milky Sea</strong> is a rarer phenomenon — bacterial bioluminescence rather than dinoflagellate — where thousands of square kilometers of ocean glow faintly and continuously for days. First photographed from space in 2005. The light is so uniform and pervasive that it looks like a flat white surface from orbit.</p>
+
+  <p>The shader approximates the dinoflagellate variety: localized, triggered by disturbance, fading over seconds. The Milky Sea would be the ambient floor — always slightly lit, everywhere, no trigger needed. That's the <code>max(emission, 0.012)</code> under static text: the organisms that are always barely alive.</p>
+</div>
+
+<!-- ── Closing ── -->
+<div class="closing">
+  <div class="eyebrow" style="color: var(--bio-dim); margin-bottom: 24px;">palimpsest / abyss</div>
+  <h2>Pitch black.<br><em>Touch the water.</em></h2>
+  <p>A daily-driver dark theme. Nothing visible at rest. The act of writing makes the ocean visible — each keystroke a pressure wave, each character a momentary flash, the whole thing drifting slowly back to dark.</p>
+
+  <div class="config-cards">
+    <div class="config-card">
+      <div class="config-card-label">to use</div>
+      <div class="config-swatch"></div>
+      <p>Copy <code>abyss.conf</code> to <code>~/.config/ghostty/config</code>, or run <code>shade abyss</code> if you have the <code>shade</code> util.</p>
+    </div>
+    <div class="config-card">
+      <div class="config-card-label">files</div>
+      <div class="config-swatch" style="background: linear-gradient(135deg, #010305 50%, #003820 100%);"></div>
+      <p><code>abyss.glsl</code> — fragment shader, bloom<br><code>abyss.compute.msl</code> — disturbance, emission, drift<br><code>abyss.conf</code> — Ghostty config</p>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── WebGL2 demo ──────────────────────────────────────────────────────────────
+const canvas = document.getElementById('abyssCanvas');
+const gl = canvas.getContext('webgl2');
+
+const vsSource = `#version 300 es
+in vec2 a_pos;
+out vec2 v_uv;
+void main() {
+  v_uv = a_pos * .5 + .5;
+  gl_Position = vec4(a_pos, 0, 1);
+}`;
+
+const fsSource = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 fragColor;
+uniform sampler2D u_state;
+uniform vec2 u_res;
+
+#define BIO_COLOR vec3(0.02, 0.78, 0.58)
+#define BIO_FLASH vec3(0.18, 1.0, 0.82)
+#define OCEAN_BG  vec3(0.004, 0.012, 0.020)
+
+void main() {
+  float emission = texture(u_state, v_uv).g;
+
+  // bloom
+  float bloom = 0.0;
+  float ga = 2.39996323;
+  for (int i = 0; i < 24; i++) {
+    float a = float(i) * ga;
+    float r = 2.0 + float(i) * 0.55;
+    vec2 off = vec2(cos(a), sin(a)) * r / u_res;
+    bloom += texture(u_state, v_uv + off).g;
+  }
+  bloom /= 24.0;
+
+  float core = emission;
+  float halo = pow(bloom, 2.2);
+
+  vec3 color = OCEAN_BG;
+  color += BIO_COLOR * halo * 1.4;
+  color += BIO_FLASH * core * 0.9;
+
+  fragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
+}`;
+
+const simSource = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 fragColor;
+uniform sampler2D u_prev;
+uniform vec2 u_mouse;  // uv of touch, or -1
+uniform float u_touched;
+
+void main() {
+  vec4 prev = texture(u_prev, v_uv);
+  float prevDisturb = prev.r;
+  float prevEmit    = prev.g;
+  float t           = mod(prev.b + 0.004, 6.2832);
+  float prevLuma    = prev.a;
+
+  // mouse disturbance
+  float mouseDist = length(v_uv - u_mouse);
+  float mouseDisturb = u_touched > 0.5 ? max(0.0, 1.0 - mouseDist * 14.0) : 0.0;
+
+  // drift velocity
+  vec2 vel = vec2(
+    sin(v_uv.y * 3.7 + t * 0.9) * cos(v_uv.x * 2.1 + t * 0.4),
+    cos(v_uv.x * 3.1 + t * 0.7) * sin(v_uv.y * 2.5 + t * 0.5)
+  ) * 0.00015;
+
+  float advectedEmit = texture(u_prev, v_uv - vel).g;
+
+  float disturbance = max(prevDisturb * 0.88, mouseDisturb);
+  disturbance = min(disturbance, 1.0);
+
+  float target = disturbance * 0.85;
+  float emission = advectedEmit * 0.960;
+  emission = mix(emission, max(emission, target), 0.12);
+  emission = min(emission, 1.0);
+
+  fragColor = vec4(disturbance, emission, t, prevLuma);
+}`;
+
+function compileShader(gl, type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  return s;
+}
+function makeProgram(gl, vs, fs) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compileShader(gl, gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, compileShader(gl, gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(p);
+  return p;
+}
+
+const renderProg = makeProgram(gl, vsSource, fsSource);
+const simProg    = makeProgram(gl, vsSource, simSource);
+
+const quad = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+
+function makeTexture() {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, 600, 375, 0, gl.RGBA, gl.FLOAT, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+}
+function makeFBO(tex) {
+  const f = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  return f;
+}
+
+const texA = makeTexture(), texB = makeTexture();
+const fboA = makeFBO(texA), fboB = makeFBO(texB);
+let ping = { tex: texA, fbo: fboA }, pong = { tex: texB, fbo: fboB };
+
+let mouse = [-1, -1], touched = 0;
+canvas.addEventListener('mousemove', e => {
+  if (e.buttons === 0 && !touched) return;
+  const r = canvas.getBoundingClientRect();
+  mouse = [(e.clientX - r.left) / r.width, 1 - (e.clientY - r.top) / r.height];
+  touched = 1;
+});
+canvas.addEventListener('mousedown', e => {
+  const r = canvas.getBoundingClientRect();
+  mouse = [(e.clientX - r.left) / r.width, 1 - (e.clientY - r.top) / r.height];
+  touched = 1;
+});
+canvas.addEventListener('mouseup',   () => { touched = 0; });
+canvas.addEventListener('mouseleave',() => { touched = 0; });
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const r = canvas.getBoundingClientRect(), t = e.touches[0];
+  mouse = [(t.clientX - r.left) / r.width, 1 - (t.clientY - r.top) / r.height];
+  touched = 1;
+}, {passive: false});
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  const r = canvas.getBoundingClientRect(), t = e.touches[0];
+  mouse = [(t.clientX - r.left) / r.width, 1 - (t.clientY - r.top) / r.height];
+}, {passive: false});
+canvas.addEventListener('touchend', () => { touched = 0; });
+
+function bindQuad(prog) {
+  const loc = gl.getAttribLocation(prog, 'a_pos');
+  gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+}
+
+// read pixel for stats
+const readBuf = new Float32Array(4);
+let centerDisturb = 0, centerEmit = 0, driftPhase = 0;
+
+function frame() {
+  // sim pass
+  gl.bindFramebuffer(gl.FRAMEBUFFER, pong.fbo);
+  gl.viewport(0, 0, 600, 375);
+  gl.useProgram(simProg);
+  bindQuad(simProg);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, ping.tex);
+  gl.uniform1i(gl.getUniformLocation(simProg, 'u_prev'), 0);
+  gl.uniform2fv(gl.getUniformLocation(simProg, 'u_mouse'), mouse);
+  gl.uniform1f(gl.getUniformLocation(simProg, 'u_touched'), touched);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+  // read stats from center of disturbed area
+  gl.readPixels(300, 187, 1, 1, gl.RGBA, gl.FLOAT, readBuf);
+  centerDisturb = readBuf[0];
+  centerEmit    = readBuf[1];
+  driftPhase    = readBuf[2] / 6.2832;
+
+  // render pass
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, 600, 375);
+  gl.useProgram(renderProg);
+  bindQuad(renderProg);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, pong.tex);
+  gl.uniform1i(gl.getUniformLocation(renderProg, 'u_state'), 0);
+  gl.uniform2fv(gl.getUniformLocation(renderProg, 'u_res'), [600, 375]);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+  // swap
+  [ping, pong] = [pong, ping];
+
+  // update stat bars
+  const d = Math.min(centerDisturb, 1);
+  const em = Math.min(centerEmit, 1);
+  document.getElementById('statDisturb').style.width = (d * 100) + '%';
+  document.getElementById('statDisturbVal').textContent = d.toFixed(2);
+  document.getElementById('statEmit').style.width = (em * 100) + '%';
+  document.getElementById('statEmitVal').textContent = em.toFixed(2);
+  document.getElementById('statDrift').style.width = (driftPhase * 100) + '%';
+  document.getElementById('statDriftVal').textContent = driftPhase.toFixed(2);
+
+  requestAnimationFrame(frame);
+}
+
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

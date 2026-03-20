@@ -42,8 +42,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
     // Perceptual curve: flash looks bright, then falls to near-dark fast
     // pow > 1 crushes midtones - only the peak of the flash reads as bright
-    float core = pow(emission, 1.8);
-    float halo = pow(bloom, 1.4);
+    float core = pow(emission, 2.8);
+    float halo = pow(bloom, 2.0);
 
     // -- Color --------------------------------------------------------
     vec3 color = OCEAN_BG;

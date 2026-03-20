@@ -1,0 +1,170 @@
+// RAIN COMPUTE -- beaded droplets on waxed glass
+//
+// State texture (rgba16f):
+//   R = water amount [0,1]
+//   G = droplet age  [0,1] (for streak trails)
+//   B = velocity     (accumulated downward speed)
+//   A = unused
+//
+// Waxed glass: high surface tension -> round beads, fast sliding,
+//              droplets merge on contact, minimal spreading.
+//
+// Texture bindings:
+//   t0 = iChannel0 (terminal)
+//   t2 = iChannel1 (display feedback -- frame seed)
+//   t3 = state_read
+//   t8 = state_write
+
+#include <metal_stdlib>
+using namespace metal;
+
+// -- Tuning ----------------------------------------------------------
+constant int   FLOW_SPEED       = 5;       // pixels per frame downward
+constant float EVAP_RATE        = 0.0004;  // slow evaporation (beads persist)
+constant float EDGE_EVAP        = 0.004;   // isolated small beads vanish faster
+constant float FLOW_THRESHOLD   = 0.025;   // min water to propagate
+constant float SURFACE_WANDER   = 0.003;   // minimal horizontal drift (smooth wax)
+constant float RAIN_DENSITY     = 0.993;   // steady rain
+constant float BEAD_TENSION     = 0.20;    // pull toward neighbors
+constant float MERGE_THRESHOLD  = 0.12;    // merge cascade trigger
+constant float TRAIL_DECAY      = 0.992;   // trails linger longer (visible streams)
+constant float TRAIL_DEPOSIT    = 0.25;    // thicker trail from streams
+constant float STREAM_PULL      = 0.6;     // how much a flowing column attracts water
+
+// -- Helpers ---------------------------------------------------------
+float hash21(float2 p) {
+    p = fract(p * float2(127.1, 311.7));
+    p += dot(p, p.yx + 19.19);
+    return fract(p.x * p.y);
+}
+
+float noise(float2 p) {
+    float2 i = floor(p);
+    float2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = hash21(i);
+    float b = hash21(i + float2(1, 0));
+    float c = hash21(i + float2(0, 1));
+    float d = hash21(i + float2(1, 1));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+// -- Kernel ----------------------------------------------------------
+kernel void computeMain(
+    texture2d<float, access::sample> terminal    [[ texture(0) ]],
+    texture2d<float, access::sample> feedback    [[ texture(2) ]],
+    texture2d<float, access::sample> state_read  [[ texture(3) ]],
+    texture2d<float, access::write>  state_write [[ texture(8) ]],
+    uint2                            gid         [[ thread_position_in_grid ]]
+) {
+    uint W = state_write.get_width();
+    uint H = state_write.get_height();
+    if (gid.x >= W || gid.y >= H) return;
+
+    constexpr sampler smp(filter::linear, address::clamp_to_edge);
+    float2 uv = (float2(gid) + 0.5) / float2(W, H);
+    float2 px = 1.0 / float2(W, H);
+
+    // -- Read current state ----------------------------------------
+    float4 prev  = state_read.sample(smp, uv);
+    float water  = prev.r;
+    float trail  = prev.g;
+    float vel    = prev.b;
+
+    // -- Frame seed ------------------------------------------------
+    float3 fs = feedback.sample(smp, float2(0.5)).rgb;
+    float frameSeed = fract(dot(fs, float3(13.7, 53.3, 91.1)));
+
+    // -- Horizontal wander (very subtle on wax) --------------------
+    float surfNoise = (noise(uv * 80.0) - 0.5);
+    float xOffset = surfNoise * SURFACE_WANDER;
+
+    // -- Gravity: pull water from above ----------------------------
+    float inflow = 0.0;
+    for (int dy = 1; dy <= FLOW_SPEED; dy++) {
+        float2 aboveUV = clamp(uv + float2(xOffset, -float(dy) * px.y),
+                               float2(0.001), float2(0.999));
+        float w = state_read.sample(smp, aboveUV).r;
+        inflow = max(inflow, w);
+    }
+
+    // Also check trail above -- water follows existing stream paths
+    float trailAbove = 0.0;
+    for (int dy = 1; dy <= FLOW_SPEED; dy++) {
+        float2 aboveUV = clamp(uv + float2(xOffset, -float(dy) * px.y),
+                               float2(0.001), float2(0.999));
+        trailAbove = max(trailAbove, state_read.sample(smp, aboveUV).g);
+    }
+
+    float newWater = water;
+    if (inflow > FLOW_THRESHOLD) {
+        // More water flows along established streams
+        float streamBoost = 1.0 + trailAbove * STREAM_PULL;
+        newWater = max(water, inflow * 0.998 * streamBoost);
+    }
+
+    // -- Beading: surface tension pulls water toward neighbors -----
+    float wetL = state_read.sample(smp, uv + float2(-px.x, 0)).r;
+    float wetR = state_read.sample(smp, uv + float2( px.x, 0)).r;
+    float wetU = state_read.sample(smp, uv + float2(0, -px.y)).r;
+    float wetD = state_read.sample(smp, uv + float2(0,  px.y)).r;
+    float nbWater = (wetL + wetR + wetU + wetD) * 0.25;
+
+    // Pull toward concentrations (beading effect)
+    float tension = (nbWater - newWater) * BEAD_TENSION;
+    newWater += tension;
+
+    // Merge cascade: when nearby drops touch, they rush together
+    if (nbWater > MERGE_THRESHOLD && newWater > MERGE_THRESHOLD * 0.5) {
+        newWater = max(newWater, nbWater * 0.95);
+    }
+
+    // Stream attraction: water near an existing trail gets pulled into it
+    float trailL = state_read.sample(smp, uv + float2(-px.x * 3.0, 0)).g;
+    float trailR = state_read.sample(smp, uv + float2( px.x * 3.0, 0)).g;
+    xOffset += (trailR - trailL) * 0.003; // drift toward nearby streams
+
+    // -- Surface tension: isolated water evaporates ----------------
+    float isolation = 1.0 - smoothstep(0.0, 0.10, nbWater);
+    newWater *= (1.0 - EVAP_RATE);
+    newWater -= isolation * EDGE_EVAP;
+
+    // -- Trail: thin film left behind by moving drops --------------
+    float newTrail = trail * TRAIL_DECAY;
+    if (water > 0.15 && inflow < water * 0.5) {
+        // This cell had water that moved on -- leave a trail
+        newTrail = max(newTrail, TRAIL_DEPOSIT);
+    }
+    // Active water overwrites trail
+    if (newWater > 0.1) {
+        newTrail = 0.0;
+    }
+
+    // -- Rain seeding at top ---------------------------------------
+    if (uv.y < 0.02) {
+        // Beaded drops: small seed clusters
+        // Bigger seed clusters (8px) for fatter initial drops
+        float2 seedCell = floor(float2(gid) / 8.0);
+        float seedRng = hash21(seedCell * 0.043 + frameSeed * 61.3);
+        if (seedRng > RAIN_DENSITY) {
+            float dist = length(float2(gid) - seedCell * 8.0 - 4.0);
+            float drop = smoothstep(5.0, 0.0, dist);
+            newWater = max(newWater, drop * 0.95);
+        }
+    }
+
+    // Occasional new beads appearing on the glass (hitting the surface)
+    // Splatter drops across the glass -- bigger, more frequent
+    float dropRng = hash21(float2(gid) * 0.019 + frameSeed * 47.3);
+    if (dropRng > 0.9999) {
+        newWater = max(newWater, 0.6);
+    }
+
+    newWater = clamp(newWater, 0.0, 1.0);
+    newTrail = clamp(newTrail, 0.0, 1.0);
+
+    // -- Velocity tracking (for motion-based refraction) -----------
+    float newVel = (newWater > 0.05) ? min(vel + 0.02, 1.0) : vel * 0.95;
+
+    state_write.write(float4(newWater, newTrail, newVel, 0.0), gid);
+}

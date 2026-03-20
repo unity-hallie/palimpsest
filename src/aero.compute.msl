@@ -1,0 +1,103 @@
+// AERO COMPUTE -- breath on cold glass
+//
+// State texture (rgba16f):
+//   R = fog density   [0,1]
+//   G = water amount  [0,1]  (condensation droplets)
+//   B = (unused)
+//   A = timer         [0,1]  (wrapping frame counter for breath phase)
+//
+// Simple approach: fog is a smooth field driven by breath cycle.
+// Condensation droplets nucleate sparsely and grow slowly.
+// No aggressive merging or tension -- just gentle beading.
+
+#include <metal_stdlib>
+using namespace metal;
+
+// -- Helpers ---------------------------------------------------------
+float hash21(float2 p) {
+    p = fract(p * float2(127.1, 311.7));
+    p += dot(p, p.yx + 19.19);
+    return fract(p.x * p.y);
+}
+
+// -- Kernel ----------------------------------------------------------
+kernel void computeMain(
+    texture2d<float, access::sample> terminal    [[ texture(0) ]],
+    texture2d<float, access::sample> feedback    [[ texture(2) ]],
+    texture2d<float, access::sample> state_read  [[ texture(3) ]],
+    texture2d<float, access::write>  state_write [[ texture(8) ]],
+    uint2                            gid         [[ thread_position_in_grid ]]
+) {
+    uint W = state_write.get_width();
+    uint H = state_write.get_height();
+    if (gid.x >= W || gid.y >= H) return;
+
+    constexpr sampler smp(filter::linear, address::clamp_to_edge);
+    float2 uv = (float2(gid) + 0.5) / float2(W, H);
+    float2 px = 1.0 / float2(W, H);
+
+    float4 prev = state_read.sample(smp, uv);
+    float fog   = prev.r;
+    float water = prev.g;
+
+    // -- Global timer from pixel (0,0) -------------------------------
+    float timer;
+    if (gid.x == 0 && gid.y == 0) {
+        timer = fract(prev.a + 0.0012);  // ~8s cycle at 60fps
+    } else {
+        timer = state_read.sample(smp, float2(0.5 / float(W), 0.5 / float(H))).a;
+    }
+
+    // -- Breath: smooth sine pulse -----------------------------------
+    float exhale = max(0.0, sin(timer * 6.28318));
+    exhale *= exhale;
+
+    float2 center = float2(0.48, 0.46);
+    float dist = length(uv - center);
+    float breathFog = exhale * 0.015 * exp(-dist * dist / 0.14);
+
+    // -- Fog: heavy diffusion for smoothness -------------------------
+    // 8-tap neighbor average for smoother spread
+    float f = 0.0;
+    f += state_read.sample(smp, uv + float2(-px.x, 0)).r;
+    f += state_read.sample(smp, uv + float2( px.x, 0)).r;
+    f += state_read.sample(smp, uv + float2(0, -px.y)).r;
+    f += state_read.sample(smp, uv + float2(0,  px.y)).r;
+    f += state_read.sample(smp, uv + float2(-px.x, -px.y)).r;
+    f += state_read.sample(smp, uv + float2( px.x, -px.y)).r;
+    f += state_read.sample(smp, uv + float2(-px.x,  px.y)).r;
+    f += state_read.sample(smp, uv + float2( px.x,  px.y)).r;
+    float fAvg = f / 8.0;
+
+    // Strong diffusion: 20% blend toward neighbors each frame
+    float newFog = mix(fog, fAvg, 0.20);
+    newFog += breathFog;
+    // Evaporate -- faster at edges
+    newFog -= 0.003 + 0.004 * smoothstep(0.0, 0.5, dist);
+    newFog = clamp(newFog, 0.0, 1.0);
+
+    // -- Condensation: sparse, gentle --------------------------------
+    float newWater = water;
+
+    // Slow growth where fog is present
+    if (newWater > 0.005 && newFog > 0.15) {
+        newWater += 0.0004 * newFog;
+    }
+
+    // Slow evaporation
+    newWater -= 0.0002;
+
+    // Very sparse nucleation -- only in foggy areas
+    float3 fs = feedback.sample(smp, float2(0.5)).rgb;
+    float frameSeed = fract(dot(fs, float3(13.7, 53.3, 91.1)));
+    if (newFog > 0.25 && newWater < 0.02) {
+        float rng = hash21(float2(gid) * 0.0071 + frameSeed * 41.3);
+        if (rng > 0.99995) {
+            newWater = 0.08;
+        }
+    }
+
+    newWater = clamp(newWater, 0.0, 0.8);
+
+    state_write.write(float4(newFog, newWater, 0.0, timer), gid);
+}

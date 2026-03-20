@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+"""
+precompile [name [name ...]]   -- compile src/<name>.{glsl,compute.msl} -> <name>.{glsl,compute.msl}
+precompile                     -- compile all shader pairs found in src/
+
+Directives (in source files):
+
+  //@ include "file.glsl"            -- inline file from src/
+  //@ define NAME value              -- emit #define NAME value
+  //@ lut name func start end steps  -- emit a precomputed const float[N] LUT
+  //@ if GLSL                        -- conditional block (GLSL | METAL/MSL)
+  //@ else
+  //@ endif
+
+Supported lut funcs: sin cos tan asin acos atan sqrt exp log log2 log10
+"""
+
+import sys, re, math
+from pathlib import Path
+
+ROOT = Path(__file__).parent
+SRC  = ROOT / "src"
+
+# ---------------------------------------------------------------------------
+# LUT generation
+# ---------------------------------------------------------------------------
+
+FUNCS = {
+    "sin":   math.sin,
+    "cos":   math.cos,
+    "tan":   math.tan,
+    "asin":  math.asin,
+    "acos":  math.acos,
+    "atan":  math.atan,
+    "sqrt":  math.sqrt,
+    "exp":   math.exp,
+    "log":   math.log,
+    "log2":  lambda x: math.log2(x),
+    "log10": math.log10,
+    "abs":   abs,
+    "floor": math.floor,
+    "ceil":  math.ceil,
+}
+
+def generate_lut(args: str, target: str) -> str:
+    """//@ lut name func start end steps"""
+    parts = args.split()
+    if len(parts) != 5:
+        raise ValueError(f"lut expects: name func start end steps -- got: {args!r}")
+    name, func_name = parts[0], parts[1]
+    start, end, steps = float(parts[2]), float(parts[3]), int(parts[4])
+    fn = FUNCS.get(func_name)
+    if fn is None:
+        raise ValueError(f"unknown lut func {func_name!r}. Available: {', '.join(FUNCS)}")
+    values = [fn(start + (end - start) * i / max(steps - 1, 1)) for i in range(steps)]
+    vals_str = ", ".join(f"{v:.8f}" for v in values)
+    if target == "glsl":
+        return f"const float {name}[{steps}] = float[]({vals_str});"
+    else:  # msl
+        return f"constant float {name}[{steps}] = {{{vals_str}}};"
+
+# ---------------------------------------------------------------------------
+# Condition evaluation
+# ---------------------------------------------------------------------------
+
+def eval_cond(cond: str, target: str) -> bool:
+    c = cond.strip().upper()
+    if c in ("METAL", "MSL"):
+        return target == "msl"
+    if c in ("GLSL", "GL"):
+        return target == "glsl"
+    return False
+
+# ---------------------------------------------------------------------------
+# Core processor
+# ---------------------------------------------------------------------------
+
+def process(src_path: Path, target: str, _stack: list | None = None) -> str:
+    """Recursively process a source file. _stack guards against circular includes."""
+    if _stack is None:
+        _stack = []
+    if src_path in _stack:
+        raise ValueError(f"circular include: {src_path}")
+    _stack = _stack + [src_path]
+
+    lines   = src_path.read_text(encoding="utf-8").splitlines()
+    output  = []
+    cond    = []  # stack of bool -- True = currently emitting
+
+    def active():
+        return all(cond) if cond else True
+
+    directive_re = re.compile(r"^\s*//@ (\w+)\s*(.*?)\s*$")
+
+    for lineno, line in enumerate(lines, 1):
+        m = directive_re.match(line)
+        if not m:
+            if active():
+                output.append(line)
+            continue
+
+        verb, rest = m.group(1), m.group(2)
+
+        if verb == "include":
+            if active():
+                fname = rest.strip("\"'")
+                inc_path = SRC / fname
+                if not inc_path.exists():
+                    raise FileNotFoundError(f"{src_path}:{lineno}: include not found: {inc_path}")
+                output.append(f"// -- begin include {fname} --")
+                output.append(process(inc_path, target, _stack))
+                output.append(f"// -- end include {fname} --")
+
+        elif verb == "define":
+            if active():
+                output.append(f"#define {rest}")
+
+        elif verb == "lut":
+            if active():
+                output.append(generate_lut(rest, target))
+
+        elif verb == "if":
+            cond.append(eval_cond(rest, target))
+
+        elif verb == "else":
+            if not cond:
+                raise SyntaxError(f"{src_path}:{lineno}: //@ else without //@ if")
+            cond[-1] = not cond[-1]
+
+        elif verb == "endif":
+            if not cond:
+                raise SyntaxError(f"{src_path}:{lineno}: //@ endif without //@ if")
+            cond.pop()
+
+        else:
+            raise SyntaxError(f"{src_path}:{lineno}: unknown directive: {verb!r}")
+
+    if cond:
+        raise SyntaxError(f"{src_path}: unclosed //@ if")
+
+    return "\n".join(output)
+
+# ---------------------------------------------------------------------------
+# File-level compile
+# ---------------------------------------------------------------------------
+
+def target_for(path: Path) -> str:
+    return "msl" if ".msl" in path.suffixes else "glsl"
+
+def compile_file(src_path: Path):
+    target = target_for(src_path)
+    out_path = ROOT / src_path.name
+    print(f"  {src_path.relative_to(ROOT)} -> {out_path.name}", end=" ", flush=True)
+    text = process(src_path, target)
+    # ASCII guard -- same rule as project: no non-ASCII in shader files
+    try:
+        text.encode("ascii")
+    except UnicodeEncodeError as e:
+        print("FAIL")
+        raise ValueError(f"non-ASCII in compiled output of {src_path.name}: {e}")
+    out_path.write_text(text, encoding="ascii")
+    print("ok")
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def shader_sources_for(name: str) -> list:
+    found = []
+    for ext in ("glsl", "compute.msl"):
+        p = SRC / f"{name}.{ext}"
+        if p.exists():
+            found.append(p)
+    if not found:
+        raise FileNotFoundError(f"no source files found in src/ for {name!r}")
+    return found
+
+def all_sources() -> list:
+    glsl = sorted(SRC.glob("*.glsl"))
+    msl  = sorted(SRC.glob("*.compute.msl"))
+    return glsl + msl
+
+def main():
+    names = sys.argv[1:]
+    if names:
+        sources = []
+        for name in names:
+            sources.extend(shader_sources_for(name))
+    else:
+        sources = all_sources()
+        if not sources:
+            print("nothing in src/ to compile")
+            return
+
+    errors = 0
+    for src in sources:
+        try:
+            compile_file(src)
+        except Exception as e:
+            print(f"ERROR: {e}")
+            errors += 1
+
+    if errors:
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

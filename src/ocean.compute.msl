@@ -1,0 +1,204 @@
+// ocean.compute.msl -- boid fish school
+//
+// State texture row 0 only (rest unused):
+//   gid.y == 0, gid.x in [0..61] : fish  (R=posX, G=posY, B=velX, A=velY)
+//   gid.y == 0, gid.x == 62      : time counter (R=t, GBA unused)
+//   all other pixels              : pass-through zeros
+
+#include <metal_stdlib>
+using namespace metal;
+
+// -- Tuning --------------------------------------------------------------------
+#define NUM_FISH        32
+#define HORIZON_MID     0.50f      // midtide -- matches ocean.glsl HORIZON
+#define TIDE_AMP        0.17f      // matches ocean.glsl
+#define TIDE_TIME       180.0f     // matches ocean.glsl
+
+// Locomotion
+#define FISH_THRUST     0.00232f   // forward propulsion force
+#define FISH_SPEED      0.01520f   // scales turn/steer forces
+#define MAX_SPEED       0.00360f   // absolute speed cap
+#define MIN_SPEED       0.00008f   // fish always swim at least this fast
+#define DAMP_FORWARD    0.99f      // damping along heading (drag)
+#define DAMP_LATERAL    0.20f      // damping perpendicular to heading (turn resistance)
+#define MAX_TURN        0.00048f   // max lateral force per frame (turn rate cap)
+
+// Boid radii
+#define R_SEP           0.030f     // separation radius
+#define R_ALIGN         0.600f     // alignment radius
+#define R_COHESION      0.220f     // cohesion radius
+
+// Boid weights
+#define W_SEP           0.3f       // separation weight
+#define W_ALIGN         0.005f     // alignment lerp per frame (~2s to converge)
+#define W_COHESION      0.67f       // cohesion weight
+#define W_BOUNDARY      4.0f       // boundary repulsion weight
+
+// Wander
+#define WANDER_PERIOD    40.0f     // seconds between preferred direction changes
+#define WANDER_SPREAD   0.55f      // 0=all fish go same way, 1=fully random phases
+#define WANDER_STRENGTH 0.0202f    // lerp rate toward preferred direction per frame
+
+#define ASPECT          1.78f      // approx screen aspect (forces only)
+// -----------------------------------------------------------------------------
+
+static float hash21(float2 p) {
+    p = fract(p * float2(127.1f, 311.7f));
+    p += dot(p, p.yx + 19.19f);
+    return fract(p.x * p.y);
+}
+
+kernel void computeMain(
+    texture2d<float, access::sample> terminal    [[ texture(0) ]],
+    texture2d<float, access::sample> feedback    [[ texture(2) ]],
+    texture2d<float, access::sample> state_read  [[ texture(3) ]],
+    texture2d<float, access::write>  state_write [[ texture(8) ]],
+    uint2 gid [[ thread_position_in_grid ]]
+) {
+    uint W = state_write.get_width();
+    uint H = state_write.get_height();
+    if (gid.x >= W || gid.y >= H) return;
+
+    constexpr sampler smp(filter::nearest, address::clamp_to_edge);
+
+    // -- Pass-through: all pixels except row 0 --------------------------------
+    if (gid.y > 0u) {
+        state_write.write(float4(0), gid);
+        return;
+    }
+
+    // -- Time counter at slot NUM_FISH (after all fish) ------------------------
+    float2 timeUV = float2(float(NUM_FISH) + 0.5f, 0.5f) / float2(W, H);
+    float t = state_read.sample(smp, timeUV).r + 0.016f;
+    float tideH = HORIZON_MID + sin(t * 6.28318f / TIDE_TIME) * TIDE_AMP;
+
+    if (gid.x == uint(NUM_FISH)) {
+        state_write.write(float4(t, 0, 0, 0), gid);
+        return;
+    }
+
+    // -- Pass-through: slots beyond NUM_FISH+1 --------------------------------
+    if (gid.x > uint(NUM_FISH)) {
+        state_write.write(float4(0), gid);
+        return;
+    }
+
+    // -- This is a fish --------------------------------------------------------
+    uint fishIdx = gid.x;
+    float fi = float(fishIdx);
+    float2 fishUV = float2(fi + 0.5f, 0.5f) / float2(W, H);
+    float4 self = state_read.sample(smp, fishUV);
+    float2 pos = self.rg;
+    float2 vel = self.ba;
+
+    // -- Initialize if invalid (first frame or escaped) ------------------------
+    bool invalid = (pos.y < tideH + 0.01f || pos.y > 0.98f ||
+                    pos.x < 0.01f || pos.x > 0.99f ||
+                    (pos.x == 0.0f && pos.y == 0.0f));
+    if (invalid) {
+        // Scatter into water region with some spread around center
+        float hx = hash21(float2(fi * 1.37f, t + 1.0f));
+        float hy = hash21(float2(fi * 2.71f, t + 2.0f));
+        float ha = hash21(float2(fi * 3.14f, t + 3.0f));
+        float spawnRange = max((1.0f - tideH) - 0.14f, 0.05f);  // fit within current water depth
+        pos = float2(0.15f + hx * 0.70f,
+                     tideH + 0.12f + hy * spawnRange);
+        float angle = ha * 6.2832f;
+        vel = float2(cos(angle), sin(angle)) * FISH_SPEED;
+    }
+
+    // -- Read all fish for boid forces -----------------------------------------
+    float2 sepForce   = float2(0);
+    float2 alignSum   = float2(0);
+    float2 cohSum     = float2(0);
+    int    nSep = 0, nAlign = 0, nCoh = 0;
+
+    for (int i = 0; i < NUM_FISH; i++) {
+        if (i == int(fishIdx)) continue;
+        float2 nUV  = float2(float(i) + 0.5f, 0.5f) / float2(W, H);
+        float4 nb   = state_read.sample(smp, nUV);
+        float2 nPos = nb.rg;
+        float2 nVel = nb.ba;
+        if (nPos.y < tideH) continue;  // uninitialized neighbor
+
+        float2 diff  = pos - nPos;
+        float2 diffA = float2(diff.x * ASPECT, diff.y);  // aspect-correct distance
+        float  dist  = length(diffA);
+
+        if (dist < R_SEP && dist > 0.0001f) {
+            // Smooth falloff: strong at edge, gentle at close range
+            // Avoids dipole locking from 1/dist spike
+            float t01 = 1.0f - dist / R_SEP;           // 0 at edge, 1 at center
+            sepForce += normalize(diffA) * t01 * t01;  // quadratic, max=1
+            nSep++;
+        }
+        if (dist < R_ALIGN) {
+            alignSum += nVel;
+            nAlign++;
+        }
+        if (dist < R_COHESION) {
+            cohSum += nPos;
+            nCoh++;
+        }
+    }
+
+    float  spd   = length(vel);
+    float2 vdir  = spd > 0.00001f ? vel / spd : float2(1, 0);
+    float2 perp  = float2(-vdir.y, vdir.x);
+    float2 steer = float2(0);
+
+    if (nSep > 0)
+        steer += (sepForce / float(nSep)) * W_SEP * FISH_SPEED * 0.5f;
+    if (nAlign > 0) {
+        // Gently lerp velocity toward neighbors' average -- no hard steer
+        float2 avgVel = alignSum / float(nAlign);
+        vel = mix(vel, avgVel, W_ALIGN);
+    }
+    if (nCoh > 0) {
+        float2 toCenter = (cohSum / float(nCoh)) - pos;
+        float  tcLen    = length(toCenter);
+        if (tcLen > 0.00001f)
+            steer += (toCenter / tcLen) * W_COHESION * FISH_SPEED * 0.05f;
+    }
+
+    // -- Stable preferred heading -- changes every WANDER_PERIOD seconds ------
+    float wanderSlot  = floor(t / WANDER_PERIOD + fi * WANDER_SPREAD * 0.37f);
+    float wanderAngle = hash21(float2(fi * 3.7f, wanderSlot)) * 6.2832f;
+    float2 wantDir    = float2(cos(wanderAngle), sin(wanderAngle));
+    vel = mix(vel, wantDir * FISH_SPEED, WANDER_STRENGTH);
+
+    // -- Boundary repulsion ----------------------------------------------------
+    float bm = 0.06f;
+    float2 bForce = float2(0);
+    if (pos.x < bm)             bForce.x += (bm - pos.x) / bm;
+    if (pos.x > 1.0f - bm)     bForce.x -= (pos.x - (1.0f - bm)) / bm;
+    if (pos.y < tideH + bm)     bForce.y += (tideH + bm - pos.y) / bm;
+    if (pos.y > 0.94f)          bForce.y -= (pos.y - 0.94f) / 0.06f;
+    steer += bForce * W_BOUNDARY * FISH_SPEED * 0.12f;
+
+    // -- Forward swim drive -- fish always propel themselves --------------------
+    // Without this, damping stalls them into dead fish
+    steer += vdir * FISH_THRUST;
+
+    // -- Clamp lateral steer (turn rate) independently of forward thrust -------
+    float2 fwdSteer = vdir * dot(steer, vdir);          // component along heading
+    float2 latSteer = steer - fwdSteer;                 // component perpendicular
+    float latMag = length(latSteer);
+    if (latMag > MAX_TURN) latSteer = latSteer / latMag * MAX_TURN;
+    steer = fwdSteer + latSteer;
+
+    // -- Integrate with split damping ------------------------------------------
+    float2 fwdVel = vdir * dot(vel, vdir);
+    float2 latVel = vel - fwdVel;
+    vel = fwdVel * DAMP_FORWARD + latVel * DAMP_LATERAL + steer;
+
+    // Speed clamp -- each fish has a personal max (0.6x-1.4x)
+    float speedScale = 0.6f + hash21(float2(fi * 5.9f, 2.3f)) * 0.8f;
+    spd = length(vel);
+    if (spd > MAX_SPEED * speedScale) vel = vel / spd * MAX_SPEED * speedScale;
+    if (spd < MIN_SPEED && spd > 0.00001f) vel = vel / spd * MIN_SPEED;
+
+    pos += vel;
+
+    state_write.write(float4(pos, vel), gid);
+}

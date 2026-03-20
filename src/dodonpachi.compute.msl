@@ -1,0 +1,295 @@
+// DODONPACHI COMPUTE -- TickWorld bullet emitter system
+//
+// State texture layout:
+//   Pixel (0,0).r = global tick counter
+//   All other pixels in rows 1+: one bullet per pixel
+//     .r = position x  [0,1]
+//     .g = position y  [0,1]
+//     .b = life        [0,1] (0=dead)
+//     .a = packed: angle (0-1 maps to 0-TAU) + speed in high bits
+//
+// Actually simpler: we store velocity directly.
+// Row 0: tick + velocity data
+//   (0,0) = tick counter
+//   (bulletIdx+1, 0) = velocity (vx, vy, accel, emitterID)
+// Row 1+: position/life
+//   .rg = pos, .b = life, .a = emitterID
+//
+// WAIT -- can't write two pixels per thread. Let's just use TWO rows per bullet.
+// OR: simplest -- just track pos + vel in a SINGLE pixel by updating vel from spawn params.
+//
+// SIMPLEST: bullet pixel stores (posX, posY, velAngle, life).
+// Velocity is recomputed each frame from angle + per-emitter speed logic.
+// This means speed can't change per-bullet over time... unless we also store speed.
+//
+// OK let's do: .r=posX, .g=posY, .b=life, .a= packed(angle*0.001 + speed)
+// Nah. TWO pixels per bullet. Even rows = position, odd rows = velocity.
+//
+// ACTUALLY: just use sequential pairs. Bullet N:
+//   pixel N*2   in the linear buffer = (posX, posY, life, emitterID)
+//   pixel N*2+1 in the linear buffer = (velX, velY, accel, 0)
+
+#include <metal_stdlib>
+using namespace metal;
+
+constant int MAX_BULLETS = 200;
+constant float LIFE_DECAY = 0.004;
+
+float hash21(float2 p) {
+    p = fract(p * float2(127.1, 311.7));
+    p += dot(p, p.yx + 19.19);
+    return fract(p.x * p.y);
+}
+
+float callOverTime(int tick, float a, float b, int period) {
+    return mix(a, b, float(tick % period) / float(period));
+}
+
+float callOverTimeSin(int tick, float a, float b, int period) {
+    float t = sin(float(tick % period) / float(period) * 6.28318) * 0.5 + 0.5;
+    return mix(a, b, t);
+}
+
+float callOverTimePingPong(int tick, float a, float b, int period) {
+    float t = float(tick % period) / float(period);
+    t = 1.0 - abs(t * 2.0 - 1.0);
+    return mix(a, b, t);
+}
+
+// Linear index to texture coordinate
+float2 idxToUV(int idx, uint W, uint H) {
+    int x = idx % int(W);
+    int y = idx / int(W);
+    return (float2(float(x), float(y)) + 0.5) / float2(float(W), float(H));
+}
+
+int uvToIdx(uint2 gid, uint W) {
+    return int(gid.x) + int(gid.y) * int(W);
+}
+
+kernel void computeMain(
+    texture2d<float, access::sample> terminal    [[ texture(0) ]],
+    texture2d<float, access::sample> feedback    [[ texture(2) ]],
+    texture2d<float, access::sample> state_read  [[ texture(3) ]],
+    texture2d<float, access::write>  state_write [[ texture(8) ]],
+    uint2                            gid         [[ thread_position_in_grid ]]
+) {
+    uint W = state_write.get_width();
+    uint H = state_write.get_height();
+    if (gid.x >= W || gid.y >= H) return;
+
+    constexpr sampler smp(filter::nearest, address::clamp_to_edge);
+    int linearIdx = uvToIdx(gid, W);
+
+    // -- Tick counter: pixel 0 ---------------------------------------
+    if (linearIdx == 0) {
+        float prevTick = state_read.sample(smp, idxToUV(0, W, H)).r;
+        float newTick = prevTick + 1.0;
+        if (newTick > 65536.0) newTick = 0.0;
+        state_write.write(float4(newTick, 0, 0, 0), gid);
+        return;
+    }
+
+    // -- Bullet data starts at index 1 -------------------------------
+    // Pairs: index 1 + bulletIdx*2 = position, index 2 + bulletIdx*2 = velocity
+    int pairIdx = linearIdx - 1;  // 0-based from after tick pixel
+    int bulletIdx = pairIdx / 2;
+    bool isPos = (pairIdx % 2) == 0;
+
+    if (bulletIdx >= MAX_BULLETS) {
+        // Pass through everything outside bullet range
+        state_write.write(state_read.sample(smp, idxToUV(linearIdx, W, H)), gid);
+        return;
+    }
+
+    // Read tick
+    float tickF = state_read.sample(smp, idxToUV(0, W, H)).r;
+    int tick = int(tickF);
+
+    // Read this bullet's position and velocity
+    int posIdx = 1 + bulletIdx * 2;
+    int velIdx = 1 + bulletIdx * 2 + 1;
+    float4 posData = state_read.sample(smp, idxToUV(posIdx, W, H));
+    float4 velData = state_read.sample(smp, idxToUV(velIdx, W, H));
+
+    float2 pos = posData.rg;
+    float life = posData.b;
+    float emitterID = posData.a;
+    float2 vel = velData.rg;
+    float accel = velData.b;
+
+    // -- Bomb -- every 540 ticks (~9s), convert nearby bullets to bling --
+    int bombCycle = 540;
+    int tickInCycle = tick % bombCycle;
+    bool bombActive = (tickInCycle < 5);
+    int bombIdx = tick / bombCycle;
+    float2 bombPos = float2(
+        0.2 + 0.6 * hash21(float2(float(bombIdx) * 7.3, 1.0)),
+        0.2 + 0.6 * hash21(float2(float(bombIdx) * 13.1, 2.0))
+    );
+    float bombRadius = 0.35;
+
+    // -- Update existing bullet --------------------------------------
+    if (life > 0.0) {
+        // Bomb conversion: bullets near bomb become bling
+        if (bombActive && emitterID < 5.0) {
+            float dist = length(pos - bombPos);
+            if (dist < bombRadius) {
+                emitterID = 6.0;  // convert to bling
+                // Pop UP then gravity takes over
+                float popAngle = -1.5708 + (hash21(pos * 137.0) - 0.5) * 1.0;  // mostly up, some spread
+                float popSpeed = 0.003 + hash21(pos * 91.0) * 0.002;
+                vel = float2(cos(popAngle) * popSpeed, sin(popAngle) * popSpeed);
+                accel = 0.0;  // gravity handled directly below
+                life = 1.0;
+            }
+        }
+
+        // Bling: gravity with terminal velocity
+        if (emitterID == 6.0) {
+            float gravity = 0.00012;
+            float terminalVel = 0.004;
+            vel.y += gravity;  // accelerate downward
+            // Clamp to terminal velocity
+            if (vel.y > terminalVel) vel.y = terminalVel;
+        }
+
+        float vlen = length(vel);
+        if (vlen > 0.0001) {
+            vel += normalize(vel) * accel;
+        }
+        pos += vel;
+        if (emitterID != 6.0) {
+            life -= LIFE_DECAY;  // bling doesn't decay -- lives until offscreen
+        }
+
+        if (pos.x < -0.08 || pos.x > 1.08 || pos.y < -0.08 || pos.y > 1.08) {
+            life = 0.0;
+        }
+
+        if (isPos) {
+            state_write.write(float4(pos, life, emitterID), gid);
+        } else {
+            state_write.write(float4(vel, accel, 0), gid);
+        }
+        return;
+    }
+
+    // -- Spawn (only handle on position pixel; vel pixel mirrors) ----
+    if (!isPos) {
+        // Check if our position twin just spawned by reading fresh
+        // Can't -- we run in parallel. So vel pixel also checks spawn.
+    }
+
+    // Spawn logic for each emitter
+    float2 newPos = float2(0);
+    float2 newVel = float2(0);
+    float newAccel = 0.0;
+    float newEmitter = -1.0;
+    bool doSpawn = false;
+
+    // -- Emitter 0: Pink spiral (0-49) -------------------------------
+    if (bulletIdx < 50) {
+        int arm = bulletIdx / 10;
+        int slot = bulletIdx % 10;
+        if (tick % 6 == slot % 6) {
+            float armAngle = float(arm) * 6.28318 / 5.0;
+            float drift = callOverTime(tick, 0.0, 6.28318, 240);
+            float speed = 0.002 + 0.0015 * sin(float(tick) * 0.02 + float(arm) * 1.2);
+            float angle = armAngle + drift;
+
+            newPos = float2(0.5 + sin(float(tick) * 0.008) * 0.15,
+                            0.35 + cos(float(tick) * 0.006) * 0.1);
+            newVel = float2(cos(angle), sin(angle)) * speed;
+            newAccel = 0.00003;
+            newEmitter = 0.0;
+            doSpawn = true;
+        }
+    }
+
+    // -- Emitter 1: Blue streams (50-85) -----------------------------
+    else if (bulletIdx < 86) {
+        int localIdx = bulletIdx - 50;
+        int stream = localIdx / 12;
+        int slot = localIdx % 12;
+        if (tick % 8 == slot % 8) {
+            float fanCenter = callOverTimePingPong(tick, -0.5, 0.5, 240);
+            float angle = 1.7 + float(stream - 1) * 0.2 + fanCenter;
+            float speedMod = 0.8 + 0.4 * cos(fanCenter * 3.14159);
+            float speed = 0.003 * speedMod;
+            float acc = callOverTimeSin(tick, -0.00002, 0.00004, 180);
+
+            newPos = float2(0.8 + sin(float(tick) * 0.005) * 0.08, 0.15);
+            newVel = float2(cos(angle), sin(angle)) * speed;
+            newAccel = acc;
+            newEmitter = 1.0;
+            doSpawn = true;
+        }
+    }
+
+    // -- Emitter 2: Gold medals -- stream down from top (86-141) -----
+    // Medals spawn across the top, drift down with shimmer
+    else if (bulletIdx < 142) {
+        int localIdx = bulletIdx - 86;
+        if (tick % 15 == localIdx % 15) {  // slower spawn rate
+            // Spread across top of screen
+            float x = hash21(float2(float(localIdx) * 7.3, float(tick / 15) * 3.1));
+            newPos = float2(x, -0.02);  // just above top
+            // Drift downward with horizontal shimmer
+            float shimmer = sin(float(tick) * 0.04 + float(localIdx) * 2.0) * 0.0005;
+            newVel = float2(shimmer, 0.0012);  // gentle downward
+            newAccel = 0.0;
+            newEmitter = 5.0;  // medal type
+            doSpawn = true;
+        }
+    }
+
+    // -- Emitter 3: Pink wall (142-161) ------------------------------
+    else if (bulletIdx < 162) {
+        int localIdx = bulletIdx - 142;
+        if (tick % 10 == localIdx % 10) {
+            float x = float(localIdx) / 20.0;
+            float wave = sin(float(tick) * 0.025 + float(localIdx) * 0.9) * 0.05;
+            float angle = 1.5708 + sin(float(tick) * 0.015 + x * 6.28318) * 0.3;
+            float centerDist = abs(x - 0.5) * 2.0;
+            float speed = 0.002 + 0.001 * (1.0 - centerDist);
+
+            newPos = float2(x, 0.55 + wave);
+            newVel = float2(cos(angle), sin(angle)) * speed;
+            newAccel = 0.0;
+            newEmitter = 3.0;
+            doSpawn = true;
+        }
+    }
+
+    // -- Emitter 4: Purple fans (162-201) ----------------------------
+    else if (bulletIdx < 202) {
+        int localIdx = bulletIdx - 162;
+        int arm = localIdx / 10;
+        int slot = localIdx % 10;
+        if (tick % 5 == slot % 5) {
+            float armAngle = float(arm) * 6.28318 / 4.0;
+            float drift = callOverTime(tick, 0.0, 6.28318, 200);
+            float sweep = sin(float(tick) * 0.012) * 0.6;
+            float angle = armAngle + drift + sweep;
+            float speed = 0.0025 + 0.0015 * sin(float(tick) * 0.03 + float(arm) * 1.5);
+            float acc = sin(float(tick) * 0.02 + float(arm)) * 0.00003;
+
+            newPos = float2(0.4 + sin(float(tick) * 0.0035) * 0.2, 0.85);
+            newVel = float2(cos(angle), sin(angle)) * speed;
+            newAccel = acc;
+            newEmitter = 4.0;
+            doSpawn = true;
+        }
+    }
+
+    if (doSpawn) {
+        if (isPos) {
+            state_write.write(float4(newPos, 1.0, newEmitter), gid);
+        } else {
+            state_write.write(float4(newVel, newAccel, 0), gid);
+        }
+    } else {
+        state_write.write(float4(0), gid);
+    }
+}

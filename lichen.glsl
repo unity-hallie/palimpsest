@@ -1,17 +1,13 @@
-// lichen.glsl -- crustose lichen on dark stone
+// lichen.glsl -- crustose lichen colonies on dark stone
 //
-// No compute. Overlapping fbm patches with:
-// - cracked areola interior (min of two noise fields)
-// - fake subsurface scattering at thin patch edges
-// - ambient occlusion in cracks (no specular -- lichen is matte)
-// - vivid Caloplaca, grey Xanthoparmelia, yellow Candelaria, dark Buellia
+// No compute. Domain-warped noise for organic patch shapes.
+// Sparse coverage -- mostly bare stone with a few distinct colonies.
 //
 // iChannel0 = terminal content
 
-// -- Tuning ----------------------------------------------------------
-#define GROWTH_SPEED  0.006
+#define GROWTH_SPEED  0.005
+#define COLONIZE_TIME 300.0   // seconds to reach full coverage (~5 min)
 #define BG_COLOR      vec3(0.05, 0.05, 0.06)
-// --------------------------------------------------------------------
 
 float hash2(vec2 p) {
     p = fract(p * vec2(127.1, 311.7));
@@ -36,10 +32,16 @@ float fbm3(vec2 p) {
     return v;
 }
 
+// Domain warp: displace coordinates using fbm, then sample fbm again
+// This creates organic, tendril-like shapes instead of round blobs
+float warpedFbm(vec2 p, float warpStr) {
+    vec2 q = vec2(fbm3(p), fbm3(p + vec2(5.2, 1.3)));
+    return fbm3(p + q * warpStr);
+}
+
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 uv = fragCoord / iResolution.xy;
 
-    // -- Terminal -------------------------------------------------
     vec4 termRaw = texture(iChannel0, uv);
     vec3 term = termRaw.rgb;
     float textLuma = dot(term, vec3(0.299, 0.587, 0.114));
@@ -49,112 +51,117 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
     float t = iTime * GROWTH_SPEED;
 
-    // -- Stone base -----------------------------------------------
-    // Multi-scale grain: large weathering + fine crystal texture
+    // -- Stone ----------------------------------------------------
     float grain0 = noise(uv * 18.0);
-    float grain1 = noise(uv * 45.0);
-    float grain2 = noise(uv * 90.0);
-    float stoneGrain = grain0 * 0.12 + grain1 * 0.06 + grain2 * 0.03;
+    float grain1 = noise(uv * 50.0);
+    float stoneGrain = grain0 * 0.12 + grain1 * 0.05;
     vec3 stone = BG_COLOR + vec3(stoneGrain * 0.6, stoneGrain * 0.5, stoneGrain * 0.4);
-    // Weathering darkens low spots
     stone *= 0.85 + 0.15 * grain0;
 
-    // -- Areola crack network -------------------------------------
-    // Two noise fields at different scales -- cracks where both are low
-    float cr0 = noise(uv * 75.0);
-    float cr1 = noise(uv * 52.0 + 33.0);
-    float crackRaw = min(cr0, cr1);
-    // Soft crack: 0 = deep crack, 1 = center of areola
-    float crackSoft = smoothstep(0.22, 0.40, crackRaw);
-    // Ambient occlusion: cracks trap light, darkening gradually
-    // This is the key to looking organic vs metallic
-    float crackAO = 0.4 + 0.6 * smoothstep(0.18, 0.50, crackRaw);
+    // -- Crack network (shared, but only visible inside patches) --
+    float cr0 = noise(uv * 70.0);
+    float cr1 = noise(uv * 48.0 + 33.0);
+    float crackAO = 0.45 + 0.55 * smoothstep(0.20, 0.45, min(cr0, cr1));
 
-    // -- Shared patch helper values --------------------------------
-    float totalPatchMask = 0.0;
+    // -- Colonization curve ---------------------------------------
+    // growth: 0 at t=0 (bare stone), 1 at COLONIZE_TIME (full)
+    // Eases in slowly -- first specks appear around 20%, big patches by 60%
+    float growth = clamp(iTime / COLONIZE_TIME, 0.0, 1.0);
+    growth = growth * growth * (3.0 - 2.0 * growth);  // smoothstep shape
+
     vec3 lichenColor = vec3(0.0);
+    float totalPatch = 0.0;
 
-    // -- Layer 0: Caloplaca -- vivid orange/rust sunburst ----------
-    float n0 = fbm3(uv * vec2(4.0, 3.5) + vec2(t * 0.3, t * 0.1));
-    float thresh0 = 0.44 + 0.08 * sin(t * 1.5) + noise(uv * 7.0 + t * 0.2) * 0.1;
-    float patch0 = smoothstep(thresh0, thresh0 + 0.04, n0);
-    // How deep into the patch: 0 at edge, 1 at center
-    float depth0 = smoothstep(thresh0, thresh0 + 0.15, n0);
-    // Subsurface: thin edges transmit warm light
-    float sss0 = (1.0 - depth0) * patch0;
-    // Base color deepens toward center
-    vec3 col0 = mix(
-        vec3(0.70, 0.40, 0.08),   // warm translucent edge
-        vec3(0.50, 0.18, 0.03),   // deep opaque center
-        depth0
-    );
-    // Interior variation -- chalky, powdery texture
-    col0 *= 0.82 + 0.18 * noise(uv * 38.0 + 1.3);
-    // SSS glow at edges
-    col0 += vec3(0.15, 0.06, 0.01) * sss0;
-    // Crack AO darkens cracks, no specular
-    col0 *= crackAO;
-    lichenColor += col0 * patch0;
-    totalPatchMask = max(totalPatchMask, patch0);
+    // -- Colony 0: large Caloplaca -- orange, domain-warped -------
+    // Appears ~30% into colonization, reaches full size last
+    {
+        float colGrowth = smoothstep(0.30, 0.90, growth);
+        vec2 p0 = uv * vec2(2.8, 2.2) + vec2(t * 0.2, t * 0.08);
+        float w0 = warpedFbm(p0, 1.2);
+        // Threshold drops as colony grows -- starts invisible, expands
+        float thresh = mix(0.85, 0.52, colGrowth) + 0.04 * sin(t * 1.2);
+        float patch = smoothstep(thresh, thresh + 0.05, w0);
+        float depth = smoothstep(thresh, thresh + 0.18, w0);
+        // SSS at thin edges
+        float sss = (1.0 - depth) * patch;
+        vec3 col = mix(
+            vec3(0.65, 0.38, 0.08),  // warm translucent edge
+            vec3(0.45, 0.16, 0.03),  // deep opaque center
+            depth
+        );
+        col *= 0.82 + 0.18 * noise(uv * 35.0 + 1.3);
+        col += vec3(0.12, 0.05, 0.01) * sss;
+        col *= mix(crackAO, 1.0, 0.3);  // cracks subtler on big colonies
+        lichenColor += col * patch;
+        totalPatch = max(totalPatch, patch);
+    }
 
-    // -- Layer 1: Xanthoparmelia -- grey-green foliose-like ---------
-    float n1 = fbm3(uv * vec2(5.5, 4.5) + vec2(20.0 + t * 0.2, 10.0 - t * 0.15));
-    float thresh1 = 0.46 + 0.06 * sin(t * 2.1 + 3.0) + noise(uv * 9.0 + 5.0) * 0.08;
-    float patch1 = smoothstep(thresh1, thresh1 + 0.03, n1);
-    float depth1 = smoothstep(thresh1, thresh1 + 0.12, n1);
-    float sss1 = (1.0 - depth1) * patch1;
-    vec3 col1 = mix(
-        vec3(0.22, 0.26, 0.14),   // thin edge -- greener
-        vec3(0.15, 0.17, 0.13),   // thick center -- greyed
-        depth1
-    );
-    col1 *= 0.78 + 0.22 * noise(uv * 42.0 + 8.7);
-    col1 += vec3(0.04, 0.08, 0.02) * sss1;
-    col1 *= crackAO;
-    float vis1 = patch1 * (1.0 - patch0 * 0.7);
-    lichenColor += col1 * vis1;
-    totalPatchMask = max(totalPatchMask, vis1);
+    // -- Colony 1: medium Xanthoparmelia -- grey-green, less warp --
+    // Appears ~20% in
+    {
+        float colGrowth = smoothstep(0.20, 0.75, growth);
+        vec2 p1 = uv * vec2(4.5, 3.8) + vec2(18.0 + t * 0.15, 9.0 - t * 0.1);
+        float w1 = warpedFbm(p1, 0.9);
+        float thresh = mix(0.82, 0.50, colGrowth) + 0.04 * sin(t * 1.8 + 3.0);
+        float patch = smoothstep(thresh, thresh + 0.04, w1);
+        float depth = smoothstep(thresh, thresh + 0.14, w1);
+        float sss = (1.0 - depth) * patch;
+        vec3 col = mix(
+            vec3(0.20, 0.24, 0.13),
+            vec3(0.13, 0.15, 0.11),
+            depth
+        );
+        col *= 0.78 + 0.22 * noise(uv * 40.0 + 8.7);
+        col += vec3(0.03, 0.06, 0.02) * sss;
+        col *= crackAO;
+        float vis = patch * (1.0 - totalPatch * 0.8);
+        lichenColor += col * vis;
+        totalPatch = max(totalPatch, vis);
+    }
 
-    // -- Layer 2: Candelaria -- bright yellow spots ----------------
-    float n2 = fbm3(uv * vec2(9.0, 7.0) + vec2(40.0 - t * 0.4, 25.0 + t * 0.2));
-    float thresh2 = 0.50 + 0.04 * sin(t * 1.8 + 7.0) + noise(uv * 11.0 + 12.0) * 0.06;
-    float patch2 = smoothstep(thresh2, thresh2 + 0.025, n2);
-    float depth2 = smoothstep(thresh2, thresh2 + 0.08, n2);
-    vec3 col2 = mix(
-        vec3(0.65, 0.55, 0.12),   // translucent yellow edge
-        vec3(0.50, 0.42, 0.06),   // deeper center
-        depth2
-    );
-    col2 *= 0.85 + 0.15 * noise(uv * 48.0 + 15.0);
-    col2 += vec3(0.10, 0.08, 0.0) * (1.0 - depth2) * patch2;
-    col2 *= crackAO;
-    float vis2 = patch2 * (1.0 - totalPatchMask * 0.6);
-    lichenColor += col2 * vis2;
-    totalPatchMask = max(totalPatchMask, vis2);
+    // -- Colony 2: small scattered Candelaria -- yellow spots ------
+    // First visible species -- tiny specks appear ~10% in
+    {
+        float colGrowth = smoothstep(0.10, 0.55, growth);
+        vec2 p2 = uv * vec2(8.0, 6.5) + vec2(35.0 - t * 0.3, 20.0 + t * 0.15);
+        float w2 = warpedFbm(p2, 0.5);
+        float thresh = mix(0.80, 0.57, colGrowth) + noise(uv * 10.0 + 12.0) * 0.05;
+        float patch = smoothstep(thresh, thresh + 0.03, w2);
+        float depth = smoothstep(thresh, thresh + 0.08, w2);
+        vec3 col = mix(
+            vec3(0.60, 0.50, 0.10),
+            vec3(0.45, 0.38, 0.05),
+            depth
+        );
+        col *= 0.85 + 0.15 * noise(uv * 50.0 + 15.0);
+        col += vec3(0.08, 0.06, 0.0) * (1.0 - depth) * patch;
+        col *= crackAO;
+        float vis = patch * (1.0 - totalPatch * 0.7);
+        lichenColor += col * vis;
+        totalPatch = max(totalPatch, vis);
+    }
 
-    // -- Layer 3: Buellia -- dark crustose, almost black -----------
-    float n3 = fbm3(uv * vec2(7.0, 6.0) + vec2(60.0 + t * 0.1, 40.0));
-    float thresh3 = 0.48 + noise(uv * 13.0 + 20.0) * 0.06;
-    float patch3 = smoothstep(thresh3, thresh3 + 0.02, n3);
-    vec3 col3 = vec3(0.06, 0.055, 0.04);
-    col3 *= 0.9 + 0.1 * noise(uv * 50.0 + 22.0);
-    col3 *= crackAO;
-    float vis3 = patch3 * (1.0 - totalPatchMask * 0.5);
-    lichenColor += col3 * vis3;
-    totalPatchMask = max(totalPatchMask, vis3);
+    // -- Colony 3: tiny dark Buellia specks -- nearly black --------
+    // Pioneer species -- first to appear (~5%)
+    {
+        float colGrowth = smoothstep(0.05, 0.40, growth);
+        vec2 p3 = uv * vec2(11.0, 9.0) + vec2(55.0, 38.0);
+        float w3 = warpedFbm(p3, 0.3);
+        float thresh = mix(0.78, 0.60, colGrowth) + noise(uv * 14.0 + 20.0) * 0.04;
+        float patch = smoothstep(thresh, thresh + 0.02, w3);
+        vec3 col = vec3(0.06, 0.055, 0.04) * (0.9 + 0.1 * noise(uv * 55.0));
+        col *= crackAO;
+        float vis = patch * (1.0 - totalPatch * 0.5);
+        lichenColor += col * vis;
+        totalPatch = max(totalPatch, vis);
+    }
 
-    // -- Lighting: flat matte, AO only -----------------------------
-    // Lichen is powdery and diffuse -- no directional shading.
-    // All depth cues come from AO in cracks and SSS at edges.
-    // Gentle hemisphere: slightly brighter at top (sky)
+    // -- Lighting: flat matte hemisphere --------------------------
     float hemi = 0.7 + 0.3 * (1.0 - uv.y);
-    float lighting = hemi;
 
     // -- Compose --------------------------------------------------
-    vec3 color = mix(stone, lichenColor, totalPatchMask * 0.92);
-    color *= lighting;
-
-    // -- Text on top ----------------------------------------------
+    vec3 color = mix(stone, lichenColor, totalPatch * 0.92);
+    color *= hemi;
     color = mix(color, term, textMask);
 
     // -- Focus dim ------------------------------------------------

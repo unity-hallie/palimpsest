@@ -54,111 +54,78 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float growth = clamp(iTime / COLONIZE_TIME, 0.0, 1.0);
     growth = growth * growth * (3.0 - 2.0 * growth);
 
-    // -- Stone: simple grain, no crack pattern --------------------
+    // -- Stone --------------------------------------------------------
     float grain = noise(uv * 18.0) * 0.12 + noise(uv * 50.0) * 0.05;
     vec3 stone = BG_COLOR + vec3(grain * 0.6, grain * 0.5, grain * 0.4);
+
+    // -- Crack network (only visible inside patches) ------------------
+    float cr0 = noise(uv * 30.0);
+    float cr1 = noise(uv * 22.0 + 33.0);
+    float crackAO = 0.5 + 0.5 * smoothstep(0.22, 0.42, min(cr0, cr1));
 
     vec3 color = stone;
     float totalPatch = 0.0;
 
-    // -- Colony 0: large Caloplaca -- vivid orange ----------------
-    {
-        float g = smoothstep(0.30, 0.90, growth);
-        vec2 p = uv * vec2(2.8, 2.2) + vec2(t * 0.2, t * 0.08);
-        float w = warpedFbm(p, 1.2);
-        float thresh = mix(1.05, 0.55, g) + 0.04 * sin(t * 1.2);
-        float patch = smoothstep(thresh, thresh + 0.05, w);
-        float depth = smoothstep(thresh, thresh + 0.20, w);
-        float sss = (1.0 - depth) * patch;
+    // -- Colony 0: large Caloplaca -- vivid orange --------------------
+    float g0 = smoothstep(0.30, 0.90, growth);
+    float w0 = warpedFbm(uv * vec2(2.8, 2.2) + vec2(t * 0.2, t * 0.08), 1.2);
+    float thresh0 = mix(1.05, 0.55, g0) + 0.04 * sin(t * 1.2);
+    float patch0 = smoothstep(thresh0, thresh0 + 0.05, w0);
+    float depth0 = smoothstep(thresh0, thresh0 + 0.20, w0);
+    float sss0 = (1.0 - depth0) * patch0;
+    vec3 col0 = mix(vec3(0.65, 0.38, 0.08), vec3(0.45, 0.16, 0.03), depth0);
+    col0 *= 0.82 + 0.18 * noise(uv * 35.0 + 1.3);
+    col0 += vec3(0.12, 0.05, 0.01) * sss0;
+    col0 *= mix(crackAO, 1.0, 0.3);
+    color = mix(color, col0, patch0 * 0.92);
+    totalPatch = max(totalPatch, patch0);
 
-        vec3 col = mix(
-            vec3(0.65, 0.38, 0.08),
-            vec3(0.45, 0.16, 0.03),
-            depth
-        );
-        col *= 0.82 + 0.18 * noise(uv * 35.0 + 1.3);
-        col += vec3(0.12, 0.05, 0.01) * sss;
+    // -- Colony 1: Xanthoparmelia -- grey-green ------------------------
+    float g1 = smoothstep(0.20, 0.75, growth);
+    float w1 = warpedFbm(uv * vec2(4.5, 3.8) + vec2(18.0 + t * 0.15, 9.0 - t * 0.1), 0.9);
+    float thresh1 = mix(1.05, 0.52, g1) + 0.03 * sin(t * 1.8 + 3.0);
+    float patch1 = smoothstep(thresh1, thresh1 + 0.04, w1);
+    float depth1 = smoothstep(thresh1, thresh1 + 0.15, w1);
+    float sss1 = (1.0 - depth1) * patch1;
+    vec3 col1 = mix(vec3(0.20, 0.24, 0.13), vec3(0.13, 0.15, 0.11), depth1);
+    col1 *= 0.78 + 0.22 * noise(uv * 40.0 + 8.7);
+    col1 += vec3(0.03, 0.06, 0.02) * sss1;
+    col1 *= crackAO;
+    float vis1 = patch1 * (1.0 - totalPatch * 0.8);
+    color = mix(color, col1, vis1 * 0.90);
+    totalPatch = max(totalPatch, vis1);
 
-        // Cracks only inside this patch, at matching scale
-        float cr = min(noise(uv * 30.0), noise(uv * 22.0 + 33.0));
-        float ao = 0.5 + 0.5 * smoothstep(0.22, 0.42, cr);
-        col *= mix(1.0, ao, patch);
+    // -- Colony 2: Candelaria -- bright yellow specks ------------------
+    float g2 = smoothstep(0.10, 0.55, growth);
+    float w2 = warpedFbm(uv * vec2(8.0, 6.5) + vec2(35.0 - t * 0.3, 20.0 + t * 0.15), 0.5);
+    float thresh2 = mix(1.05, 0.62, g2) + noise(uv * 10.0 + 12.0) * 0.04;
+    float patch2 = smoothstep(thresh2, thresh2 + 0.03, w2);
+    float depth2 = smoothstep(thresh2, thresh2 + 0.10, w2);
+    vec3 col2 = mix(vec3(0.60, 0.50, 0.10), vec3(0.45, 0.38, 0.05), depth2);
+    col2 *= 0.85 + 0.15 * noise(uv * 50.0 + 15.0);
+    col2 += vec3(0.08, 0.06, 0.0) * (1.0 - depth2) * patch2;
+    col2 *= crackAO;
+    float vis2 = patch2 * (1.0 - totalPatch * 0.7);
+    color = mix(color, col2, vis2 * 0.88);
+    totalPatch = max(totalPatch, vis2);
 
-        color = mix(color, col, patch * 0.92);
-        totalPatch = max(totalPatch, patch);
-    }
+    // -- Colony 3: Buellia -- dark pioneer specks ----------------------
+    float g3 = smoothstep(0.05, 0.40, growth);
+    float w3 = warpedFbm(uv * vec2(11.0, 9.0) + vec2(55.0, 38.0), 0.3);
+    float thresh3 = mix(1.05, 0.64, g3) + noise(uv * 14.0 + 20.0) * 0.03;
+    float patch3 = smoothstep(thresh3, thresh3 + 0.02, w3);
+    vec3 col3 = vec3(0.06, 0.055, 0.04);
+    float vis3 = patch3 * (1.0 - totalPatch * 0.5);
+    color = mix(color, col3, vis3 * 0.85);
+    totalPatch = max(totalPatch, vis3);
 
-    // -- Colony 1: Xanthoparmelia -- grey-green --------------------
-    {
-        float g = smoothstep(0.20, 0.75, growth);
-        vec2 p = uv * vec2(4.5, 3.8) + vec2(18.0 + t * 0.15, 9.0 - t * 0.1);
-        float w = warpedFbm(p, 0.9);
-        float thresh = mix(1.05, 0.52, g) + 0.03 * sin(t * 1.8 + 3.0);
-        float patch = smoothstep(thresh, thresh + 0.04, w);
-        float depth = smoothstep(thresh, thresh + 0.15, w);
-        float sss = (1.0 - depth) * patch;
-
-        vec3 col = mix(
-            vec3(0.20, 0.24, 0.13),
-            vec3(0.13, 0.15, 0.11),
-            depth
-        );
-        col *= 0.78 + 0.22 * noise(uv * 40.0 + 8.7);
-        col += vec3(0.03, 0.06, 0.02) * sss;
-
-        float cr = min(noise(uv * 38.0 + 50.0), noise(uv * 28.0 + 80.0));
-        float ao = 0.5 + 0.5 * smoothstep(0.22, 0.42, cr);
-        col *= mix(1.0, ao, patch);
-
-        float vis = patch * (1.0 - totalPatch * 0.8);
-        color = mix(color, col, vis * 0.90);
-        totalPatch = max(totalPatch, vis);
-    }
-
-    // -- Colony 2: Candelaria -- bright yellow specks --------------
-    {
-        float g = smoothstep(0.10, 0.55, growth);
-        vec2 p = uv * vec2(8.0, 6.5) + vec2(35.0 - t * 0.3, 20.0 + t * 0.15);
-        float w = warpedFbm(p, 0.5);
-        float thresh = mix(1.05, 0.62, g) + noise(uv * 10.0 + 12.0) * 0.04;
-        float patch = smoothstep(thresh, thresh + 0.03, w);
-        float depth = smoothstep(thresh, thresh + 0.10, w);
-
-        vec3 col = mix(
-            vec3(0.60, 0.50, 0.10),
-            vec3(0.45, 0.38, 0.05),
-            depth
-        );
-        col *= 0.85 + 0.15 * noise(uv * 50.0 + 15.0);
-        col += vec3(0.08, 0.06, 0.0) * (1.0 - depth) * patch;
-        // Tiny patches -- no visible cracks
-
-        float vis = patch * (1.0 - totalPatch * 0.7);
-        color = mix(color, col, vis * 0.88);
-        totalPatch = max(totalPatch, vis);
-    }
-
-    // -- Colony 3: Buellia -- dark pioneer specks ------------------
-    {
-        float g = smoothstep(0.05, 0.40, growth);
-        vec2 p = uv * vec2(11.0, 9.0) + vec2(55.0, 38.0);
-        float w = warpedFbm(p, 0.3);
-        float thresh = mix(1.05, 0.64, g) + noise(uv * 14.0 + 20.0) * 0.03;
-        float patch = smoothstep(thresh, thresh + 0.02, w);
-
-        vec3 col = vec3(0.06, 0.055, 0.04);
-        float vis = patch * (1.0 - totalPatch * 0.5);
-        color = mix(color, col, vis * 0.85);
-        totalPatch = max(totalPatch, vis);
-    }
-
-    // -- Hemisphere lighting (gentle, no directional) -------------
+    // -- Hemisphere lighting ------------------------------------------
     color *= 0.7 + 0.3 * (1.0 - uv.y);
 
-    // -- Text on top ----------------------------------------------
+    // -- Text on top --------------------------------------------------
     color = mix(color, term, textMask);
 
-    // -- Focus dim ------------------------------------------------
+    // -- Focus dim ----------------------------------------------------
     float focusT   = clamp((iTime - iTimeFocus) * 1.5, 0.0, 1.0);
     float focusMix = iFocus == 1 ? focusT : 1.0 - focusT;
     float grey     = dot(color, vec3(0.299, 0.587, 0.114));

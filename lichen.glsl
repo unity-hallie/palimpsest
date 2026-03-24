@@ -1,14 +1,13 @@
-// lichen.glsl -- slow color patches on dark stone
+// lichen.glsl -- slow organic patches on dark stone
 //
-// No compute. Voronoi cells with drifting color, like watching
-// a wall grow patina over centuries compressed into minutes.
-// Text sits clean on top.
+// No compute. Overlapping noise layers with different scales
+// and colors, thresholded to create irregular patches that
+// grow and recede. No voronoi -- just fbm with hard edges.
 //
 // iChannel0 = terminal content
 
 // -- Tuning ----------------------------------------------------------
-#define GROWTH_SPEED  0.008
-#define CELL_SCALE    5.0
+#define GROWTH_SPEED  0.006
 #define BG_COLOR      vec3(0.05, 0.05, 0.06)
 // --------------------------------------------------------------------
 
@@ -16,10 +15,6 @@ float hash2(vec2 p) {
     p = fract(p * vec2(127.1, 311.7));
     p += dot(p, p.yx + 19.19);
     return fract(p.x * p.y);
-}
-
-vec2 hash2v(vec2 p) {
-    return vec2(hash2(p), hash2(p + 71.3));
 }
 
 float noise(vec2 p) {
@@ -33,6 +28,12 @@ float noise(vec2 p) {
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
+float fbm3(vec2 p) {
+    float v = 0.0, a = 0.5;
+    for (int i = 0; i < 3; i++) { v += a * noise(p); p *= 2.1; a *= 0.5; }
+    return v;
+}
+
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 uv = fragCoord / iResolution.xy;
 
@@ -44,72 +45,53 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float textMask = smoothstep(0.03, 0.14, distFromBg);
     textMask = max(textMask, smoothstep(0.06, 0.20, textLuma));
 
-    // -- Voronoi for lichen patches --------------------------------
     float t = iTime * GROWTH_SPEED;
-    vec2 p = uv * CELL_SCALE;
-    vec2 ip = floor(p);
-    vec2 fp = fract(p);
 
-    float minDist = 10.0;
-    float secondDist = 10.0;
-    vec2 nearestCell = vec2(0.0);
+    // -- Stone base -----------------------------------------------
+    float stoneGrain = noise(uv * 22.0) * 0.15 + noise(uv * 45.0) * 0.08;
+    vec3 stone = BG_COLOR + vec3(stoneGrain * 0.6, stoneGrain * 0.5, stoneGrain * 0.4);
 
-    for (int y = -1; y <= 1; y++) {
-    for (int x = -1; x <= 1; x++) {
-        vec2 neighbor = vec2(float(x), float(y));
-        vec2 cellID = ip + neighbor;
-        vec2 point = hash2v(cellID);
-        // Cells drift very slowly
-        point += 0.15 * sin(t * (0.5 + point) * 6.28);
-        vec2 diff = neighbor + point - fp;
-        float d = dot(diff, diff);
-        if (d < minDist) {
-            secondDist = minDist;
-            minDist = d;
-            nearestCell = cellID;
-        } else if (d < secondDist) {
-            secondDist = d;
-        }
-    }}
+    // -- Lichen layers --------------------------------------------
+    // Each layer: fbm at a different scale/offset, thresholded
+    // to make irregular patches. Threshold drifts with time so
+    // patches grow and recede. Different color per layer.
+    vec3 color = stone;
 
-    minDist = sqrt(minDist);
-    secondDist = sqrt(secondDist);
+    // Layer 0: large slow moss -- dark green
+    float n0 = fbm3(uv * vec2(4.0, 3.5) + vec2(t * 0.3, t * 0.1));
+    // Warp the threshold with another noise for irregular edges
+    float thresh0 = 0.44 + 0.08 * sin(t * 1.5) + noise(uv * 7.0 + t * 0.2) * 0.1;
+    float patch0 = smoothstep(thresh0, thresh0 + 0.04, n0);
+    // Fuzzy interior texture
+    float interior0 = noise(uv * 30.0 + 1.3) * 0.3 + 0.7;
+    vec3 col0 = vec3(0.08, 0.14, 0.06) * interior0;
+    color = mix(color, col0, patch0 * 0.9);
 
-    // Edge detection -- border between cells
-    float edge = smoothstep(0.0, 0.08, secondDist - minDist);
+    // Layer 1: medium ochre/gold patches
+    float n1 = fbm3(uv * vec2(6.0, 5.0) + vec2(20.0 + t * 0.2, 10.0 - t * 0.15));
+    float thresh1 = 0.46 + 0.06 * sin(t * 2.1 + 3.0) + noise(uv * 9.0 + t * 0.15 + 5.0) * 0.08;
+    float patch1 = smoothstep(thresh1, thresh1 + 0.03, n1);
+    float interior1 = noise(uv * 35.0 + 8.7) * 0.25 + 0.75;
+    vec3 col1 = vec3(0.16, 0.12, 0.04) * interior1;
+    color = mix(color, col1, patch1 * 0.85);
 
-    // Per-cell color -- muted earth/moss tones
-    float cellHash = hash2(nearestCell);
-    float cellHash2 = hash2(nearestCell + 43.7);
+    // Layer 2: small scattered pale sage
+    float n2 = fbm3(uv * vec2(9.0, 7.0) + vec2(40.0 - t * 0.4, 25.0 + t * 0.2));
+    float thresh2 = 0.48 + 0.05 * sin(t * 1.8 + 7.0) + noise(uv * 11.0 + t * 0.1 + 12.0) * 0.07;
+    float patch2 = smoothstep(thresh2, thresh2 + 0.025, n2);
+    float interior2 = noise(uv * 40.0 + 15.0) * 0.2 + 0.8;
+    vec3 col2 = vec3(0.10, 0.13, 0.08) * interior2;
+    color = mix(color, col2, patch2 * 0.8);
 
-    // Palette: moss green, ochre, slate blue, rust, sage
-    vec3 col;
-    float hue = cellHash;
-    if (hue < 0.25) {
-        col = vec3(0.12, 0.18, 0.08);  // dark moss
-    } else if (hue < 0.45) {
-        col = vec3(0.18, 0.14, 0.06);  // ochre
-    } else if (hue < 0.60) {
-        col = vec3(0.08, 0.10, 0.15);  // slate
-    } else if (hue < 0.78) {
-        col = vec3(0.15, 0.08, 0.06);  // rust
-    } else {
-        col = vec3(0.10, 0.14, 0.10);  // sage
-    }
-
-    // Brightness varies per cell, breathes slowly
-    float breath = 0.7 + 0.3 * sin(t * 3.0 + cellHash2 * 20.0);
-    col *= breath;
-
-    // Stone texture underneath -- noise roughness
-    float stone = noise(uv * 18.0) * 0.3 + 0.7;
-
-    // Compose: stone + lichen patches, dark at edges
-    vec3 stoneCol = BG_COLOR * stone;
-    vec3 lichenCol = mix(stoneCol, col, edge * 0.85);
+    // Layer 3: tiny rust/orange specks -- highest frequency
+    float n3 = fbm3(uv * vec2(13.0, 10.0) + vec2(60.0 + t * 0.15, 40.0));
+    float thresh3 = 0.50 + noise(uv * 14.0 + 20.0) * 0.06;
+    float patch3 = smoothstep(thresh3, thresh3 + 0.02, n3);
+    vec3 col3 = vec3(0.14, 0.06, 0.03);
+    color = mix(color, col3, patch3 * 0.7);
 
     // -- Text on top ----------------------------------------------
-    vec3 color = mix(lichenCol, term, textMask);
+    color = mix(color, term, textMask);
 
     // -- Focus dim ------------------------------------------------
     float focusT   = clamp((iTime - iTimeFocus) * 1.5, 0.0, 1.0);
